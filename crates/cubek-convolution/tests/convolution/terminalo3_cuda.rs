@@ -6,7 +6,7 @@ use cubecl::{
     cuda::CudaRuntime,
     prelude::CubePrimitive,
     std::tensor::TensorHandle,
-    zspace::{Shape, shape},
+    zspace::{Shape, Strides, shape},
 };
 use cubek_convolution::{
     AcceleratedTileKind, ConvAlgorithm, ConvolutionArgs, ConvolutionInputs, Strategy, launch_ref,
@@ -139,6 +139,21 @@ fn tensor_from_f32(
         layout.memory,
         shape,
         layout.strides,
+        f16::as_type_native_unchecked(),
+    )
+}
+
+fn logical_tensor(client: &ComputeClient<CudaRuntime>, shape: Shape) -> TensorHandle<CudaRuntime> {
+    let mut strides = vec![0; shape.len()];
+    strides[shape.len() - 1] = 1;
+    for index in (0..shape.len() - 1).rev() {
+        strides[index] = strides[index + 1] * shape[index + 1];
+    }
+
+    TensorHandle::new(
+        client.create_from_slice(f16::as_bytes(&[f16::ZERO])),
+        shape,
+        Strides::new(&strides),
         f16::as_type_native_unchecked(),
     )
 }
@@ -435,6 +450,52 @@ fn test_terminalo3_forward_simple_async_strided_mma_rollout_parity() {
         &rollout_case(),
         ConvAlgorithm::SimpleAsyncStrided,
         AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_forward_large_biased_cmma_shared_memory_rejected() {
+    let client = CudaRuntime::client(&Default::default());
+    let dtypes = f16_dtypes();
+    let case = ConvolutionCase {
+        batches: 8192,
+        ..rollout_case()
+    };
+    let input = logical_tensor(&client, input_shape(&case));
+    let weight = logical_tensor(&client, weight_shape(&case));
+    let bias = logical_tensor(&client, shape![case.out_channels]);
+    let output = logical_tensor(&client, output_shape(&case));
+
+    for algorithm in [
+        ConvAlgorithm::SimpleSyncCyclic,
+        ConvAlgorithm::SimpleAsyncCyclic,
+        ConvAlgorithm::SimpleAsyncTma,
+    ] {
+        let error = launch_ref(
+            &strategy(algorithm, AcceleratedTileKind::Cmma),
+            &client,
+            ConvolutionInputs::Forward {
+                input: InputBinding::new(input.clone().binding(), dtypes.lhs_global),
+                weight: InputBinding::new(weight.clone().binding(), dtypes.rhs_global),
+                bias: Some(InputBinding::new(bias.clone().binding(), dtypes.lhs_global)),
+                out: output.clone().binding(),
+            },
+            args(&case),
+            dtypes.clone(),
+        )
+        .expect_err("oversized biased CMMA convolution should fail during setup");
+
+        let error = format!("{error:?}");
+        assert!(
+            error.contains("Shared memory budget exceeded"),
+            "{algorithm:?} returned an unexpected error: {error}",
+        );
+    }
+
+    assert_forward_parity(
+        &compact_case(),
+        ConvAlgorithm::SimpleSyncCyclic,
+        AcceleratedTileKind::Cmma,
     );
 }
 

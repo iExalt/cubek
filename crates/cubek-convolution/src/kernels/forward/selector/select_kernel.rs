@@ -56,6 +56,16 @@ pub fn launch_kernel_concrete<
     let problem = Args::adjust_problem(client, problem, &expand_info.blueprint, dtypes);
     let launch_info = A::prepare(&problem.as_matmul_problem(), &device_settings, expand_info)?;
 
+    if bias.is_some() {
+        A::BatchMatmul::validate_shared_memory(
+            client,
+            &launch_info.blueprint,
+            &launch_info.dtypes,
+            &launch_info.vector_sizes,
+            true,
+        )?;
+    }
+
     let (input, runtime_args) = <InputArg<Args> as ConcreteInputsFactory<A>>::create(
         input,
         weight,

@@ -110,14 +110,27 @@ impl<RC: RuntimeConfig, GMM: GlobalMatmulFamily<RC>, S: GlobalPartitionMatmul> B
     ) -> Result<(), MatmulSetupError> {
         GMM::validate_blueprint(client, blueprint, problem, dtypes, vector_sizes)?;
 
+        Self::validate_shared_memory(client, blueprint, dtypes, vector_sizes, false)
+    }
+
+    fn validate_shared_memory<R: Runtime>(
+        client: &ComputeClient<R>,
+        blueprint: &Self::Blueprint,
+        dtypes: &MatmulElems,
+        vector_sizes: &MatmulVectorSizes,
+        has_accumulator: bool,
+    ) -> Result<(), MatmulSetupError> {
         let stage_config =
             GMM::expand_config(client.properties(), blueprint, dtypes, vector_sizes)?
                 .stage_config();
 
         // Validate that the kernel's shared-memory footprint fits in the
         // per-cube budget the runtime reports.
-        let requested = smem_bytes(&stage_config.lhs_smem_config())
+        let mut requested = smem_bytes(&stage_config.lhs_smem_config())
             + smem_bytes(&stage_config.rhs_smem_config());
+        if has_accumulator {
+            requested += smem_bytes(&stage_config.acc_smem_config());
+        }
         let available = client.properties().hardware.max_shared_memory_size;
 
         if requested > available {

@@ -70,6 +70,20 @@ pub trait BatchMatmulFamily<RC: RuntimeConfig>: 'static + Send + Sync {
         dtypes: &MatmulElems,
         vector_sizes: &MatmulVectorSizes,
     ) -> Result<(), MatmulSetupError>;
+
+    /// Validates the shared-memory footprint for a concrete launch.
+    ///
+    /// `has_accumulator` must be true when the launch supplies an accumulator
+    /// input, such as a convolution bias.
+    fn validate_shared_memory<R: Runtime>(
+        _client: &ComputeClient<R>,
+        _blueprint: &Self::Blueprint,
+        _dtypes: &MatmulElems,
+        _vector_sizes: &MatmulVectorSizes,
+        _has_accumulator: bool,
+    ) -> Result<(), MatmulSetupError> {
+        Ok(())
+    }
 }
 
 #[cube]
