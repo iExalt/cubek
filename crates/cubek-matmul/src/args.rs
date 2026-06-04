@@ -8,7 +8,7 @@ use cubecl::std::tensor::{
 use cubecl::unexpanded;
 use cubecl::{
     prelude::*,
-    zspace::{metadata::Metadata, shape, strides},
+    zspace::{Shape, metadata::Metadata, shape, strides},
 };
 use cubek_std::launch::tma::{remap_storage_for_tma, tma_meta_tiled, transpose_inner_for_tma};
 use cubek_std::{InputBinding, MatrixLayout, stage::SwizzleMode};
@@ -19,7 +19,9 @@ use crate::components::global::memory::{
     SimpleTmaGlobalLayoutLaunch,
 };
 use crate::{
-    definition::{Blueprint as _, MatmulElems, MatmulProblem, MatmulVectorSizes},
+    definition::{
+        Blueprint as _, MatmulElems, MatmulProblem, MatmulSetupError, MatmulVectorSizes,
+    },
     routines::BatchMatmulRoutine,
 };
 
@@ -55,6 +57,15 @@ pub type BatchedCoords = (usize, u32, u32);
 /// Create the input runtime arguments for a matmul kernel that works on concrete inputs and
 /// output (not fused).
 pub trait ConcreteInputsFactory<A: BatchMatmulRoutine<()>>: LaunchArg {
+    fn validate(
+        _blueprint: &A::Blueprint,
+        _problem: &MatmulProblem,
+        _vector_sizes: &MatmulVectorSizes,
+        _dtypes: &MatmulElems,
+    ) -> Result<(), MatmulSetupError> {
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create<R: Runtime>(
         lhs: InputBinding<R>,
@@ -386,6 +397,17 @@ pub struct TensorMapInputs<Lhs: CubePrimitive, Rhs: CubePrimitive, EO: CubePrimi
 impl<Lhs: CubePrimitive, Rhs: CubePrimitive, EO: CubePrimitive, A: BatchMatmulRoutine<()>>
     ConcreteInputsFactory<A> for TensorMapInputs<Lhs, Rhs, EO>
 {
+    fn validate(
+        blueprint: &A::Blueprint,
+        problem: &MatmulProblem,
+        _vector_sizes: &MatmulVectorSizes,
+        _dtypes: &MatmulElems,
+    ) -> Result<(), MatmulSetupError> {
+        let (lhs, rhs) = tma_tile_shapes(blueprint, problem);
+        validate_tma_tile_shape("lhs", &lhs)?;
+        validate_tma_tile_shape("rhs", &rhs)
+    }
+
     fn create<R: Runtime>(
         lhs_handle: InputBinding<R>,
         rhs_handle: InputBinding<R>,
@@ -397,50 +419,7 @@ impl<Lhs: CubePrimitive, Rhs: CubePrimitive, EO: CubePrimitive, A: BatchMatmulRo
         let lhs = lhs_handle.into_data();
         let rhs = rhs_handle.into_data();
 
-        let tiling_scheme = blueprint.tiling_scheme();
-        let stage_m = tiling_scheme.elements_per_stage_along_m();
-        let stage_n = tiling_scheme.elements_per_stage_along_n();
-        let stage_k = tiling_scheme.elements_per_stage_along_k();
-
-        // Loaders use dynamic layout based on swizzle setting. For no swizzle, contiguous tiles are
-        // loaded and TMA loads single tile wide columns.
-        // For swizzled, bank conflicts aren't an issue so the tile size is the full stage.
-        let stage_size_lhs = match blueprint.swizzle_modes().lhs {
-            SwizzleMode::None => match problem.lhs_layout {
-                MatrixLayout::RowMajor => {
-                    shape![1, stage_m as usize, tiling_scheme.tile_size.k as usize]
-                }
-                MatrixLayout::ColMajor => {
-                    shape![1, stage_k as usize, tiling_scheme.tile_size.m as usize]
-                }
-            },
-            _ => match problem.lhs_layout {
-                MatrixLayout::RowMajor => {
-                    shape![1, stage_m as usize, stage_k as usize]
-                }
-                MatrixLayout::ColMajor => {
-                    shape![1, stage_k as usize, stage_m as usize]
-                }
-            },
-        };
-        let stage_size_rhs = match blueprint.swizzle_modes().rhs {
-            SwizzleMode::None => match problem.rhs_layout {
-                MatrixLayout::RowMajor => {
-                    shape![1, stage_k as usize, tiling_scheme.tile_size.n as usize]
-                }
-                MatrixLayout::ColMajor => {
-                    shape![1, stage_n as usize, tiling_scheme.tile_size.k as usize]
-                }
-            },
-            _ => match problem.rhs_layout {
-                MatrixLayout::RowMajor => {
-                    shape![1, stage_k as usize, stage_n as usize]
-                }
-                MatrixLayout::ColMajor => {
-                    shape![1, stage_n as usize, stage_k as usize]
-                }
-            },
-        };
+        let (stage_size_lhs, stage_size_rhs) = tma_tile_shapes(blueprint, problem);
 
         let lhs_rank = lhs.shape.len();
         let mut lhs_shape = shape![
@@ -524,6 +503,57 @@ impl<Lhs: CubePrimitive, Rhs: CubePrimitive, EO: CubePrimitive, A: BatchMatmulRo
             ComptimeOptionArgs::None,
         )
     }
+}
+
+fn tma_tile_shapes<B: Blueprint>(blueprint: &B, problem: &MatmulProblem) -> (Shape, Shape) {
+    let tiling_scheme = blueprint.tiling_scheme();
+    let stage_m = tiling_scheme.elements_per_stage_along_m();
+    let stage_n = tiling_scheme.elements_per_stage_along_n();
+    let stage_k = tiling_scheme.elements_per_stage_along_k();
+
+    // Loaders use dynamic layout based on swizzle setting. For no swizzle, contiguous tiles are
+    // loaded and TMA loads single tile wide columns.
+    // For swizzled, bank conflicts aren't an issue so the tile size is the full stage.
+    let lhs = match blueprint.swizzle_modes().lhs {
+        SwizzleMode::None => match problem.lhs_layout {
+            MatrixLayout::RowMajor => {
+                shape![1, stage_m as usize, tiling_scheme.tile_size.k as usize]
+            }
+            MatrixLayout::ColMajor => {
+                shape![1, stage_k as usize, tiling_scheme.tile_size.m as usize]
+            }
+        },
+        _ => match problem.lhs_layout {
+            MatrixLayout::RowMajor => shape![1, stage_m as usize, stage_k as usize],
+            MatrixLayout::ColMajor => shape![1, stage_k as usize, stage_m as usize],
+        },
+    };
+    let rhs = match blueprint.swizzle_modes().rhs {
+        SwizzleMode::None => match problem.rhs_layout {
+            MatrixLayout::RowMajor => {
+                shape![1, stage_k as usize, tiling_scheme.tile_size.n as usize]
+            }
+            MatrixLayout::ColMajor => {
+                shape![1, stage_n as usize, tiling_scheme.tile_size.k as usize]
+            }
+        },
+        _ => match problem.rhs_layout {
+            MatrixLayout::RowMajor => shape![1, stage_k as usize, stage_n as usize],
+            MatrixLayout::ColMajor => shape![1, stage_n as usize, stage_k as usize],
+        },
+    };
+
+    (lhs, rhs)
+}
+
+fn validate_tma_tile_shape(name: &str, shape: &Shape) -> Result<(), MatmulSetupError> {
+    if shape.iter().any(|dim| *dim == 0 || *dim > 256) {
+        return Err(MatmulSetupError::InvalidConfig(Box::new(format!(
+            "{name} TMA tile shape {shape:?} must have non-zero dimensions <= 256"
+        ))));
+    }
+
+    Ok(())
 }
 
 #[cube]

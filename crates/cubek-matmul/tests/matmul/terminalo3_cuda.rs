@@ -71,6 +71,21 @@ fn transposed_filled_tensor(
     )
 }
 
+fn logical_tensor(client: &ComputeClient<CudaRuntime>, shape: Shape) -> TensorHandle<CudaRuntime> {
+    let mut strides = vec![0; shape.len()];
+    strides[shape.len() - 1] = 1;
+    for index in (0..shape.len() - 1).rev() {
+        strides[index] = strides[index + 1] * shape[index + 1];
+    }
+
+    TensorHandle::new(
+        client.create_from_slice(f16::as_bytes(&[f16::ZERO])),
+        shape,
+        Strides::new(&strides),
+        f16::as_type_native_unchecked(),
+    )
+}
+
 fn assert_strategy_parity(
     client: &ComputeClient<CudaRuntime>,
     strategy: Strategy,
@@ -111,6 +126,31 @@ fn assert_strategy_parity(
             "{strategy} launch {launch_index} parity mismatches at {mismatches:?}; expected {expected}",
         );
     }
+}
+
+fn assert_strategy_rejects_oversized_tma_tile(
+    client: &ComputeClient<CudaRuntime>,
+    strategy: Strategy,
+) {
+    let lhs = logical_tensor(client, shape![8192, 2048]);
+    let rhs = logical_tensor(client, shape![2048, 512]);
+    let out = logical_tensor(client, shape![8192, 512]);
+    let dtype = f16::as_type_native_unchecked().storage_type();
+
+    let error = launch_ref(
+        &strategy,
+        client,
+        InputBinding::Normal(lhs.binding(), dtype),
+        InputBinding::Normal(rhs.binding(), dtype),
+        out.binding(),
+        &mut f16_dtypes(),
+    )
+    .expect_err("oversized TMA tile should be rejected during setup");
+    let error = format!("{error:?}");
+    assert!(
+        error.contains("TMA tile shape") && error.contains("<= 256"),
+        "{strategy} returned unexpected error: {error}",
+    );
 }
 
 fn assert_strategy_rejects_general_matmul(client: &ComputeClient<CudaRuntime>, strategy: Strategy) {
@@ -271,6 +311,27 @@ fn test_terminalo3_tma_cmma_mma_output_reuse_parity() {
     ] {
         assert_strategy_parity(&client, strategy, 256, 512, 256, false);
     }
+}
+
+#[test]
+fn test_terminalo3_tma_cmma_oversized_tile_rejected() {
+    let client = CudaRuntime::client(&Default::default());
+
+    for strategy in [
+        Strategy::SimpleTmaCmma(Default::default()),
+        Strategy::SpecializedTmaCmma(Default::default()),
+    ] {
+        assert_strategy_rejects_oversized_tma_tile(&client, strategy);
+    }
+
+    assert_strategy_parity(
+        &client,
+        Strategy::SimpleTmaMma(Default::default()),
+        256,
+        512,
+        256,
+        false,
+    );
 }
 
 #[test]

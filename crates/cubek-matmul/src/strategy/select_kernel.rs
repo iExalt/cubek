@@ -48,6 +48,12 @@ where
     let expand_info = A::expand_blueprint(&problem, &device_settings, blueprint_strategy)?;
     let launch_info = A::prepare(&problem, &device_settings, expand_info)?;
 
+    <InputArg<MA> as ConcreteInputsFactory<A>>::validate(
+        &launch_info.blueprint,
+        &problem,
+        &launch_info.vector_sizes,
+        &launch_info.dtypes,
+    )?;
     let input = <InputArg<MA> as ConcreteInputsFactory<A>>::create(
         lhs,
         rhs,
