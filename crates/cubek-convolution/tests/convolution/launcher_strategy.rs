@@ -41,6 +41,43 @@ pub struct ConvolutionSize {
     pub out_c: usize,
 }
 
+/// Test-only 2D convolution fixture for direct operation parity checks.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct ConvolutionCase {
+    pub batches: usize,
+    pub in_h: usize,
+    pub in_w: usize,
+    pub in_channels: usize,
+    pub out_channels: usize,
+    pub kernel_size: [usize; 2],
+    pub stride: [usize; 2],
+    pub padding: [usize; 2],
+    pub dilation: [usize; 2],
+    pub has_bias: bool,
+}
+
+impl ConvolutionCase {
+    pub fn out_h(&self) -> usize {
+        calculate_conv_output_size(
+            self.kernel_size[0] as u32,
+            self.stride[0] as u32,
+            self.padding[0] as i32,
+            self.dilation[0] as u32,
+            self.in_h,
+        )
+    }
+
+    pub fn out_w(&self) -> usize {
+        calculate_conv_output_size(
+            self.kernel_size[1] as u32,
+            self.stride[1] as u32,
+            self.padding[1] as i32,
+            self.dilation[1] as u32,
+            self.in_w,
+        )
+    }
+}
+
 /// Build a 2D forward conv problem and run it via the public `launch_ref`.
 /// Used by both basic-tier helpers and the macro-driven `full/` tier.
 ///
