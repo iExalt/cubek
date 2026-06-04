@@ -10,6 +10,8 @@ pub mod full;
 
 mod bias;
 pub(crate) mod launcher_strategy;
+#[cfg(feature = "cuda-tests")]
+mod terminalo3_cuda;
 
 pub(crate) use launcher_strategy::test_matmul_strategy;
 
