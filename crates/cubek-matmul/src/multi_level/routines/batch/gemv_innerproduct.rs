@@ -142,6 +142,8 @@ impl<RC: RuntimeConfig> BatchMatmulRoutine<RC> for VecMatInnerProductAlgorithm {
         device_settings: &DeviceSettings,
         strategy: &BlueprintStrategy<RC, Self>,
     ) -> Result<ExpandInfo<Self::Blueprint>, MatmulSetupError> {
+        super::validate_vecmat_problem(problem)?;
+
         let mut dtypes = MatmulElems::from_globals(&problem.global_dtypes);
 
         if TileMatmulKind::PlaneVec.can_cast_stage_element() {
@@ -269,6 +271,8 @@ impl<RC: RuntimeConfig> BatchMatmulRoutine<RC> for DoubleVecMatInnerProductAlgor
         device_settings: &DeviceSettings,
         strategy: &BlueprintStrategy<RC, Self>,
     ) -> Result<ExpandInfo<Self::Blueprint>, MatmulSetupError> {
+        super::validate_vecmat_problem(problem)?;
+
         let mut dtypes = MatmulElems::from_globals(&problem.global_dtypes);
 
         if TileMatmulKind::PlaneVec.can_cast_stage_element() {

@@ -108,6 +108,8 @@ impl BatchMatmulRoutine<()> for GemvUnitPerpendicularRoutine {
         device_settings: &DeviceSettings,
         strategy: &BlueprintStrategy<(), Self>,
     ) -> Result<ExpandInfo<Self::Blueprint>, MatmulSetupError> {
+        super::validate_vecmat_problem(problem)?;
+
         let dtypes = MatmulElems::from_globals(&problem.global_dtypes);
         let properties = device_settings.client.properties();
 
