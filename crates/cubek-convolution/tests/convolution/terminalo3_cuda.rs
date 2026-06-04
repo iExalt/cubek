@@ -153,15 +153,17 @@ fn read_f16(client: &ComputeClient<CudaRuntime>, output: TensorHandle<CudaRuntim
 
 fn assert_close(actual: &[f32], expected: &[f32]) {
     assert_eq!(actual.len(), expected.len());
-    let mismatch = actual
+    let mismatches = actual
         .iter()
         .zip(expected)
         .enumerate()
-        .find(|(_, (actual, expected))| (*actual - *expected).abs() > TOLERANCE);
+        .filter(|(_, (actual, expected))| (*actual - *expected).abs() > TOLERANCE)
+        .take(16)
+        .map(|(index, (actual, expected))| (index, actual, expected))
+        .collect::<Vec<_>>();
     assert!(
-        mismatch.is_none(),
-        "Parity mismatch at {:?}; tolerance={TOLERANCE}",
-        mismatch.map(|(index, (actual, expected))| (index, actual, expected)),
+        mismatches.is_empty(),
+        "Parity mismatches at {mismatches:?}; tolerance={TOLERANCE}",
     );
 }
 
@@ -359,6 +361,15 @@ fn test_terminalo3_forward_simple_async_tma_mma_parity() {
 }
 
 #[test]
+fn test_terminalo3_forward_simple_async_tma_mma_compact_parity() {
+    assert_forward_parity(
+        &compact_case(),
+        ConvAlgorithm::SimpleAsyncTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
 fn test_terminalo3_forward_simple_async_tma_mma_without_bias_parity() {
     let mut case = rollout_case();
     case.has_bias = false;
@@ -397,6 +408,15 @@ fn test_terminalo3_backward_data_simple_async_tma_mma_parity() {
 }
 
 #[test]
+fn test_terminalo3_backward_data_simple_async_tma_mma_compact_parity() {
+    assert_backward_data_parity(
+        &compact_case(),
+        ConvAlgorithm::SimpleAsyncTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
 fn test_terminalo3_forward_non_tma_implicit_gemm_parity() {
     let case = compact_case();
     for (algorithm, tile_kind) in [
@@ -407,6 +427,15 @@ fn test_terminalo3_forward_non_tma_implicit_gemm_parity() {
     ] {
         assert_forward_parity(&case, algorithm, tile_kind);
     }
+}
+
+#[test]
+fn test_terminalo3_forward_simple_async_strided_mma_rollout_parity() {
+    assert_forward_parity(
+        &rollout_case(),
+        ConvAlgorithm::SimpleAsyncStrided,
+        AcceleratedTileKind::Mma,
+    );
 }
 
 #[test]
