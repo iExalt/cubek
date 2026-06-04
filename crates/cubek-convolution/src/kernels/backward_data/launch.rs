@@ -10,7 +10,7 @@ use crate::{
 };
 use cubecl::{Runtime, client::ComputeClient, prelude::*};
 use cubek_matmul::{
-    definition::{AvailableVectorSizes, MatmulElems, MatmulSetupError},
+    definition::{AvailableVectorSizes, MatmulElems},
     routines::BlueprintStrategy,
 };
 use cubek_std::{InputBinding, MatrixLayout};
@@ -18,8 +18,7 @@ use cubek_std::{InputBinding, MatrixLayout};
 /// Backward-data dispatch helper.
 ///
 /// Called by `cubek_convolution::launch_ref` after the routine and
-/// blueprint-strategy have been resolved. Backward-data does not currently
-/// support the TMA reading strategy: requesting it here returns a setup error.
+/// blueprint-strategy have been resolved.
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 pub(crate) fn launch_internal<R: Runtime, const N_SPATIAL: usize, Rt: Routine>(
     client: &ComputeClient<R>,
@@ -188,14 +187,4 @@ where
         blueprint_strategy,
         &dtypes,
     )
-}
-
-/// Returned by the unified `launch_ref` when the requested routine is not
-/// supported for backward-data. Currently only the TMA reading strategy is
-/// rejected.
-#[allow(dead_code)]
-pub(crate) fn unsupported_tma_error() -> ConvSetupError {
-    ConvSetupError::Matmul(MatmulSetupError::InvalidConfig(Box::new(
-        "Data backprop doesn't yet work with current TMA tiling strategy",
-    )))
 }

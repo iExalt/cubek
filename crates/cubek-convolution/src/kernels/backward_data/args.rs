@@ -18,7 +18,7 @@ use cubek_matmul::{
     routines::BatchMatmulRoutine,
 };
 use cubek_std::launch::tma::remap_storage_for_tma;
-use cubek_std::{InputBinding, MatrixLayout};
+use cubek_std::{InputBinding, MatrixLayout, stage::SwizzleMode};
 use enumset::EnumSet;
 
 use crate::components::{
@@ -76,7 +76,10 @@ impl<A: BatchMatmulRoutine<RuntimeArgs, Blueprint = BatchMatmulBlueprint>> Concr
         blueprint: &BatchMatmulBlueprint,
         _dtypes: &MatmulElems,
     ) -> ConvolutionProblem {
-        let channel_align = blueprint.tiling_scheme.tile_size.k() as usize;
+        let channel_align = match blueprint.swizzle_modes.lhs {
+            SwizzleMode::None => blueprint.tiling_scheme.tile_size.k() as usize,
+            _ => blueprint.tiling_scheme.elements_per_stage_along_k() as usize,
+        };
         let padded_channels = problem.out_channels.next_multiple_of(channel_align);
         let shape_k = problem.kernel_size.iter().product::<u32>() as usize * padded_channels;
 
@@ -211,7 +214,10 @@ impl<
         let stage_m = tiling_scheme.elements_per_stage_along_m();
         let stage_n = tiling_scheme.elements_per_stage_along_n();
         let stage_k = tiling_scheme.elements_per_stage_along_k();
-        let tile_size_k = tiling_scheme.tile_size.k;
+        let tile_size_k = match blueprint.swizzle_modes.lhs {
+            SwizzleMode::None => tiling_scheme.tile_size.k,
+            _ => tiling_scheme.elements_per_stage_along_k(),
+        };
 
         let mut stage_size_rhs = shape![1; problem.dimensionality.num_dims()];
         stage_size_rhs.insert(0, stage_k as usize);
@@ -235,7 +241,8 @@ impl<
             out_grad.into_data().into_tensor_arg(),
             lhs_elem,
         )
-        .with_elem_stride(elem_stride);
+        .with_elem_stride(elem_stride)
+        .with_swizzle(blueprint.swizzle_modes.lhs.into());
 
         let rhs = TensorMapArg::new(
             TiledArgs {
@@ -243,7 +250,8 @@ impl<
             },
             weights.into_data().into_tensor_arg(),
             dtypes.rhs_global,
-        );
+        )
+        .with_swizzle(blueprint.swizzle_modes.rhs.into());
 
         let padded_channels = problem.padded_channels as u32;
         let shape_k = problem.k as u32;

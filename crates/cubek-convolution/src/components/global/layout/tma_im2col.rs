@@ -152,7 +152,14 @@ pub(crate) fn div_mod_seq(pos: u32, shape: &Sequence<FastDivmod<u32>>) -> (u32, 
 
 impl<R: Runtime> TmaIm2colLayoutLaunch<R> {
     pub fn from_args(problem: &ConvolutionProblem, check_kernel: bool) -> Self {
-        let shape_out = problem.out_shape.iter().map(|it| *it as u32).collect();
+        let shape_out = match problem.operation {
+            ConvolutionOperation::ForwardTransposed | ConvolutionOperation::BackwardData => {
+                problem.in_shape.iter().map(|it| *it as u32).collect()
+            }
+            ConvolutionOperation::Forward | ConvolutionOperation::BackwardWeight => {
+                problem.out_shape.iter().map(|it| *it as u32).collect()
+            }
+        };
 
         let padded_channels = problem.padded_channels as u32;
         let params = ConvolutionParams::from_problem(problem);
