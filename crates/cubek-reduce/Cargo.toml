@@ -27,6 +27,7 @@ cpu-reference = ["dep:cubek-test-utils"]
 # strategies and the bench harness. The seeded `ReduceCorrectness` impl
 # inside that module is additionally gated on `cpu-reference`.
 benchmarks = ["cpu-reference", "cubecl/test-runtime"]
+cuda-tests = ["cubecl/cuda"]
 
 [dependencies]
 cubecl = { workspace = true }
