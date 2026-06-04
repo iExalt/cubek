@@ -6,9 +6,7 @@ use cubecl::{CubeCount, CubeDim, client::Client, ir::AddressType};
 use cubek_std::cube_count::{CubeCountPlan, HypercubeBlueprint};
 
 use crate::{
-    definition::{
-        MatmulElems, MatmulProblem, MatmulSetupError, MatmulVectorSizes,
-    },
+    definition::{MatmulElems, MatmulProblem, MatmulSetupError, MatmulVectorSizes},
     multi_level::{
         BatchMatmulRoutine, ExpandInfo, LaunchInfo,
         args::{ConfigRuntimeArg, InputRuntimeArg, MatmulArgs, OutputRuntimeArg},

@@ -11,7 +11,7 @@ use cubek_std::{InputBinding, MatrixLayout, launch::tma::tma_operand};
 
 pub use crate::routine::RuntimeConfig;
 use crate::{
-    definition::{MatmulElems, MatmulProblem, MatmulVectorSizes},
+    definition::{MatmulElems, MatmulProblem, MatmulSetupError, MatmulVectorSizes},
     multi_level::{
         BatchMatmulRoutine,
         components::global::memory::{
@@ -19,8 +19,8 @@ use crate::{
             GlobalScaleLayout, NoopLayout, NoopLayoutLaunch, SimpleTmaGlobalLayout,
             SimpleTmaGlobalLayoutLaunch,
         },
-        definition::Blueprint as _,
-        stage::SwizzleMode,
+        definition::Blueprint,
+        stage::{SwizzleMode, SwizzleModes},
     },
 };
 
@@ -56,6 +56,15 @@ pub type BatchedCoords = (usize, u32, u32);
 /// Create the input runtime arguments for a matmul kernel that works on concrete inputs and
 /// output (not fused).
 pub trait ConcreteInputsFactory<A: BatchMatmulRoutine<()>>: LaunchArg {
+    fn validate(
+        _blueprint: &A::Blueprint,
+        _problem: &MatmulProblem,
+        _vector_sizes: &MatmulVectorSizes,
+        _dtypes: &MatmulElems,
+    ) -> Result<(), MatmulSetupError> {
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create(
         lhs: InputBinding,
@@ -384,6 +393,17 @@ pub struct TensorMapInputs<Lhs: CubePrimitive, Rhs: CubePrimitive, EO: CubePrimi
 impl<Lhs: CubePrimitive, Rhs: CubePrimitive, EO: CubePrimitive, A: BatchMatmulRoutine<()>>
     ConcreteInputsFactory<A> for TensorMapInputs<Lhs, Rhs, EO>
 {
+    fn validate(
+        blueprint: &A::Blueprint,
+        problem: &MatmulProblem,
+        _vector_sizes: &MatmulVectorSizes,
+        _dtypes: &MatmulElems,
+    ) -> Result<(), MatmulSetupError> {
+        let (lhs, rhs) = tma_tile_shapes(blueprint, problem);
+        validate_tma_tile_shape("lhs", lhs)?;
+        validate_tma_tile_shape("rhs", rhs)
+    }
+
     fn create(
         lhs_handle: InputBinding,
         rhs_handle: InputBinding,
@@ -395,33 +415,7 @@ impl<Lhs: CubePrimitive, Rhs: CubePrimitive, EO: CubePrimitive, A: BatchMatmulRo
         let lhs = lhs_handle.into_data();
         let rhs = rhs_handle.into_data();
 
-        let tiling_scheme = blueprint.tiling_scheme();
-        let stage_m = tiling_scheme.elements_per_stage_along_m() as usize;
-        let stage_n = tiling_scheme.elements_per_stage_along_n() as usize;
-        let stage_k = tiling_scheme.elements_per_stage_along_k() as usize;
-        let (tile_m, tile_n, tile_k) = (
-            tiling_scheme.tile_size.m as usize,
-            tiling_scheme.tile_size.n as usize,
-            tiling_scheme.tile_size.k as usize,
-        );
-
-        // Boxes in logical (rows, cols); `tma_operand` puts them in descriptor order. Without
-        // swizzle, bank conflicts cap the box at a single-tile-wide strip along the contiguous
-        // axis; swizzled loads the full stage per box.
-        let box_lhs = match blueprint.swizzle_modes().lhs {
-            SwizzleMode::None => match problem.lhs_layout {
-                MatrixLayout::RowMajor => (stage_m, tile_k),
-                MatrixLayout::ColMajor => (tile_m, stage_k),
-            },
-            _ => (stage_m, stage_k),
-        };
-        let box_rhs = match blueprint.swizzle_modes().rhs {
-            SwizzleMode::None => match problem.rhs_layout {
-                MatrixLayout::RowMajor => (stage_k, tile_n),
-                MatrixLayout::ColMajor => (tile_k, stage_n),
-            },
-            _ => (stage_k, stage_n),
-        };
+        let (box_lhs, box_rhs) = tma_tile_shapes(blueprint, problem);
 
         // Logical (batches, rows, cols), read before `tma_operand` consumes the bindings.
         let dims = |binding: &TensorBinding, batches: &[usize]| {
@@ -463,6 +457,121 @@ impl<Lhs: CubePrimitive, Rhs: CubePrimitive, EO: CubePrimitive, A: BatchMatmulRo
             ComptimeOptionArgs::None,
             ComptimeOptionArgs::None,
         )
+    }
+}
+
+fn tma_tile_shapes<B: Blueprint>(
+    blueprint: &B,
+    problem: &MatmulProblem,
+) -> ((usize, usize), (usize, usize)) {
+    tma_box_shapes(
+        blueprint.tiling_scheme(),
+        blueprint.swizzle_modes(),
+        problem.lhs_layout,
+        problem.rhs_layout,
+    )
+}
+
+fn tma_box_shapes(
+    tiling_scheme: crate::multi_level::definition::TilingScheme,
+    swizzle_modes: SwizzleModes,
+    lhs_layout: MatrixLayout,
+    rhs_layout: MatrixLayout,
+) -> ((usize, usize), (usize, usize)) {
+    let stage_m = tiling_scheme.elements_per_stage_along_m() as usize;
+    let stage_n = tiling_scheme.elements_per_stage_along_n() as usize;
+    let stage_k = tiling_scheme.elements_per_stage_along_k() as usize;
+    let (tile_m, tile_n, tile_k) = (
+        tiling_scheme.tile_size.m as usize,
+        tiling_scheme.tile_size.n as usize,
+        tiling_scheme.tile_size.k as usize,
+    );
+
+    // Boxes are logical (rows, cols); tma_operand puts them in descriptor order.
+    let lhs = match swizzle_modes.lhs {
+        SwizzleMode::None => match lhs_layout {
+            MatrixLayout::RowMajor => (stage_m, tile_k),
+            MatrixLayout::ColMajor => (tile_m, stage_k),
+        },
+        _ => (stage_m, stage_k),
+    };
+    let rhs = match swizzle_modes.rhs {
+        SwizzleMode::None => match rhs_layout {
+            MatrixLayout::RowMajor => (stage_k, tile_n),
+            MatrixLayout::ColMajor => (tile_k, stage_n),
+        },
+        _ => (stage_k, stage_n),
+    };
+    (lhs, rhs)
+}
+
+fn validate_tma_tile_shape(
+    name: &str,
+    (rows, cols): (usize, usize),
+) -> Result<(), MatmulSetupError> {
+    if !(1..=256).contains(&rows) || !(1..=256).contains(&cols) {
+        return Err(MatmulSetupError::InvalidConfig(Box::new(format!(
+            "{name} TMA tile shape ({rows}, {cols}) must have dimensions in 1..=256"
+        ))));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tma_tests {
+    use super::*;
+
+    fn tiling_scheme() -> crate::multi_level::definition::TilingScheme {
+        crate::multi_level::definition::TilingScheme::builder()
+            .with_tile_size((8, 16, 4).into())
+            .with_partition_size((2, 1, 1).into())
+            .with_stage_size((2, 1, 1).into())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn tma_box_shapes_follow_layout_and_swizzle() {
+        let none = SwizzleModes {
+            lhs: SwizzleMode::None,
+            rhs: SwizzleMode::None,
+            ..Default::default()
+        };
+        assert_eq!(
+            tma_box_shapes(
+                tiling_scheme(),
+                none,
+                MatrixLayout::RowMajor,
+                MatrixLayout::ColMajor,
+            ),
+            ((32, 4), (4, 16))
+        );
+
+        let swizzled = SwizzleModes {
+            lhs: SwizzleMode::B32,
+            rhs: SwizzleMode::B64,
+            ..Default::default()
+        };
+        assert_eq!(
+            tma_box_shapes(
+                tiling_scheme(),
+                swizzled,
+                MatrixLayout::ColMajor,
+                MatrixLayout::RowMajor,
+            ),
+            ((32, 4), (4, 16))
+        );
+    }
+
+    #[test]
+    fn tma_tile_shape_validation_enforces_descriptor_bounds() {
+        for (rows, cols) in [(1, 1), (256, 256), (1, 256), (256, 1)] {
+            assert!(validate_tma_tile_shape("operand", (rows, cols)).is_ok());
+        }
+        for shape in [(0, 1), (1, 0), (257, 1), (1, 257), (257, 257)] {
+            let error = validate_tma_tile_shape("operand", shape).unwrap_err();
+            assert!(format!("{error:?}").contains("operand TMA tile shape"));
+        }
     }
 }
 
