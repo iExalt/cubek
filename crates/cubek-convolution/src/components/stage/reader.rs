@@ -19,26 +19,44 @@ impl BiasTilingLayout {
         tile: Coords2d,
         #[comptime] config: StageMemoryConfig,
     ) -> StridedTile<ES, NS> {
-        if config.num_stages > 1 {
-            unimplemented!()
-        }
-
-        let (_, col) = tile;
-
+        let (row, col) = tile;
         let stage_vector_size = config.vector_size;
-        let tile_size_col = config.elements_per_tile_along_col / stage_vector_size;
+        let matrix_layout = config.matrix_layout;
 
-        let length = tile_size_col;
-        let start = col * tile_size_col;
+        match matrix_layout {
+            MatrixLayout::RowMajor => {
+                let tile_size_row = config.elements_per_tile_along_row;
+                let tile_size_col = config.elements_per_tile_along_col / stage_vector_size;
+                let stride = config.elements_per_stage_along_col() / stage_vector_size;
+                let length = (tile_size_row - 1) * stride + tile_size_col;
+                let start = row * tile_size_row * stride + col * tile_size_col;
 
-        StridedTile::new_strided(
-            stage.as_slice(),
-            start,
-            start + length,
-            0,
-            stage.swizzle,
-            MatrixLayout::RowMajor,
-        )
+                StridedTile::new_strided(
+                    stage.as_slice(),
+                    start,
+                    start + length,
+                    stride,
+                    stage.swizzle,
+                    matrix_layout,
+                )
+            }
+            MatrixLayout::ColMajor => {
+                let tile_size_row = config.elements_per_tile_along_row / stage_vector_size;
+                let tile_size_col = config.elements_per_tile_along_col;
+                let stride = config.elements_per_stage_along_row() / stage_vector_size;
+                let length = (tile_size_col - 1) * stride + tile_size_row;
+                let start = row * tile_size_row + col * tile_size_col * stride;
+
+                StridedTile::new_strided(
+                    stage.as_slice(),
+                    start,
+                    start + length,
+                    stride,
+                    stage.swizzle,
+                    matrix_layout,
+                )
+            }
+        }
     }
 }
 
