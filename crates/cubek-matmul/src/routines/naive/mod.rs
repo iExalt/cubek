@@ -3,7 +3,7 @@ pub mod launch;
 use std::fmt::Display;
 
 use cubecl::{CubeCount, CubeDim, Runtime, client::ComputeClient, ir::AddressType};
-use cubek_std::cube_count::CubeCountPlan;
+use cubek_std::cube_count::{CubeCountPlan, HypercubeBlueprint};
 
 use crate::{
     args::{ConfigRuntimeArg, InputRuntimeArg, MatmulArgs, OutputRuntimeArg},
@@ -147,6 +147,7 @@ impl BatchMatmulRoutine<()> for NaiveRoutine {
                 &problem.out_shape,
                 cube_dim.x,
                 cube_dim.y,
+                &device_settings.max_cube_count,
             )?,
             address_type: problem.address_type,
             vector_sizes: device_settings.vector_sizes,
@@ -161,6 +162,7 @@ fn simple_cube_count(
     output_shape: &[usize],
     cube_dim_x: u32,
     cube_dim_y: u32,
+    max_cube_count: &(u32, u32, u32),
 ) -> Result<CubeCountPlan, MatmulSetupError> {
     let ndims = lhs_shape.len();
     let m = lhs_shape[ndims - 2];
@@ -175,14 +177,38 @@ fn simple_cube_count(
         batch_cubes *= output_shape[i] as u32;
     }
 
-    let cube_count_plan = CubeCountPlan::new_from_problem((m_cubes, n_cubes, batch_cubes).into());
-    let max_cube_count = u16::MAX as u32;
+    Ok(CubeCountPlan::from_blueprint(
+        &HypercubeBlueprint::builder().build(),
+        (m_cubes, n_cubes, batch_cubes).into(),
+        max_cube_count,
+    ))
+}
 
-    if m_cubes > max_cube_count || n_cubes > max_cube_count || batch_cubes > max_cube_count {
-        return Err(MatmulSetupError::Unavailable(
-            MatmulAvailabilityError::CubeCountTooBig(cube_count_plan.resolve()),
-        ));
+#[cfg(test)]
+mod tests {
+    use super::simple_cube_count;
+    use cubecl::CubeCount;
+    use cubek_std::cube_count::CubeCountPlanKind;
+
+    #[test]
+    fn simple_cube_count_spreads_large_m_axis() {
+        let max_cube_count = (u16::MAX as u32, u16::MAX as u32, u16::MAX as u32);
+        let plan = simple_cube_count(
+            &[3_411_968, 32],
+            &[32, 32],
+            &[3_411_968, 32],
+            32,
+            8,
+            &max_cube_count,
+        )
+        .unwrap();
+
+        assert!(matches!(plan.kind, CubeCountPlanKind::Spread { .. }));
+        let CubeCount::Static(x, y, z) = plan.resolve() else {
+            panic!("Expected a static cube count");
+        };
+        assert!(x <= max_cube_count.0);
+        assert!(y <= max_cube_count.1);
+        assert!(z <= max_cube_count.2);
     }
-
-    Ok(cube_count_plan)
 }

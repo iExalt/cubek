@@ -105,7 +105,7 @@ impl<MT: MatmulTypes> BatchMatmul<(), MT> for NaiveMatmul<MT> {
 
     fn execute<Args: MatmulArgs>(
         state: &Args::State<LhsG<MT>, RhsG<MT>, AccG<MT>>,
-        _cube_mapping: CubeMapping,
+        cube_mapping: CubeMapping,
         #[comptime] _config: Self::Config,
     ) {
         let lhs = Args::view_lhs(state);
@@ -115,9 +115,17 @@ impl<MT: MatmulTypes> BatchMatmul<(), MT> for NaiveMatmul<MT> {
         let (_, _, k) = lhs.shape();
         let (_, size_m, size_n) = out.shape();
 
-        let m = ABSOLUTE_POS_X;
-        let n = ABSOLUTE_POS_Y;
-        let batch = ABSOLUTE_POS_Z as usize;
+        #[allow(clippy::collapsible_if)]
+        if cube_mapping.can_yield_extra_cubes {
+            if CUBE_POS >= cube_mapping.num_valid_cubes() {
+                terminate!()
+            }
+        }
+
+        let (cube_m, cube_n, batch) = cube_pos_to_m_n_batch(&cube_mapping);
+        let m = cube_m * CUBE_DIM_X + UNIT_POS_X;
+        let n = cube_n * CUBE_DIM_Y + UNIT_POS_Y;
+        let batch = batch as usize;
 
         let lhs_batch = Args::batch_lhs(state, batch);
         let lhs = lhs.view(SliceIndex::new(lhs_batch, lhs.shape()));
