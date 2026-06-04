@@ -50,8 +50,7 @@ impl<ES: Numeric, NS: Size> BiasStageMemory<ES, NS> {
         let align = comptime![Ord::max(alignment, swizzle_align as usize)];
         let type_size = Vector::<ES, NS>::type_size().comptime();
 
-        let stage_size_bytes =
-            config.elements_per_stage_along_contiguous_dim() as usize * type_size;
+        let stage_size_bytes = config.elements_per_stage() as usize * type_size;
         // Ensure all stages are aligned properly
         let stage_size = stage_size_bytes.next_multiple_of(align) / type_size / vector_size;
 

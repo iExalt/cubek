@@ -13,7 +13,7 @@ use cubek_matmul::{
     definition::{MatmulElems, MatmulProblem},
 };
 use cubek_std::{
-    InvalidConfigError, StageIdent,
+    InvalidConfigError, MatrixLayout, StageIdent,
     tile::{NoTilingLayout, TilingValidation},
 };
 
@@ -72,7 +72,7 @@ impl<RC: RuntimeConfig> FullLoadingStrategy<RC> for SyncBiasLoading {
         #[comptime] config: GlobalReaderConfig,
     ) -> Self::Job<EG, NG, ES, NS> {
         let vector_size = NG::value().comptime() as u32;
-        let num_stage_elements = config.smem_config.elements_per_stage_along_contiguous_dim();
+        let num_stage_elements = config.smem_config.elements_per_stage();
 
         let num_stage_vectors = num_stage_elements.div_ceil(vector_size);
         let total_units = config.loading_units_count();
@@ -123,16 +123,16 @@ impl<EG: Numeric, NG: Size, ES: Numeric, NS: Size>
         global_iter: &GlobalIterator<Vector<EG, NG>>,
         stage: &mut BiasStageMemory<ES, NS>,
         _barrier: &(),
-        #[comptime] _config: GlobalReaderConfig,
+        #[comptime] config: GlobalReaderConfig,
     ) {
         let unit_position = this.unit_position_base + task_id * this.jump_length;
 
         #[allow(clippy::collapsible_else_if)]
         if comptime!(this.balanced_workload) {
-            load_and_store_vector::<EG, NG, ES, NS>(unit_position, global_iter, stage);
+            load_and_store_vector::<EG, NG, ES, NS>(unit_position, global_iter, stage, config);
         } else {
             if unit_position < this.num_stage_elements {
-                load_and_store_vector::<EG, NG, ES, NS>(unit_position, global_iter, stage);
+                load_and_store_vector::<EG, NG, ES, NS>(unit_position, global_iter, stage, config);
             }
         }
     }
@@ -147,15 +147,26 @@ pub(crate) fn load_and_store_vector<EG: Numeric, NG: Size, ES: Numeric, NS: Size
     unit_position: u32,
     global_iter: &GlobalIterator<Vector<EG, NG>>,
     stage: &mut BiasStageMemory<ES, NS>,
+    #[comptime] config: GlobalReaderConfig,
 ) {
     let view = global_iter.view();
 
     let swizzle = stage.swizzle;
     let slice = stage.as_slice_mut();
 
-    let type_size = Vector::<ES, NS>::type_size();
-    let vector_read = view.read_checked((0, unit_position));
-    let stage_offs = swizzle.apply(unit_position, type_size);
+    let smem_config = config.smem_config;
+    let pos = match smem_config.matrix_layout {
+        MatrixLayout::RowMajor => (
+            unit_position / smem_config.elements_per_stage_along_col(),
+            unit_position % smem_config.elements_per_stage_along_col(),
+        ),
+        MatrixLayout::ColMajor => (
+            unit_position % smem_config.elements_per_stage_along_row(),
+            unit_position / smem_config.elements_per_stage_along_row(),
+        ),
+    };
+    let vector_read = view.read_checked(pos);
+    let stage_offs = swizzle.apply(unit_position, ES::type_size());
 
     slice[stage_offs as usize / NS::value()] = Vector::cast_from(vector_read);
 }

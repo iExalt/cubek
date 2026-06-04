@@ -76,7 +76,8 @@ impl MmaIOConfig {
         Self {
             lhs_load_method: load_method(device_props, lhs_stage),
             rhs_load_method: load_method(device_props, rhs_stage),
-            acc_load_method: load_method(device_props, acc_stage),
+            // Accumulator `ldmatrix` addressing is not correct for every supported tile geometry.
+            acc_load_method: LoadMethod::Manual,
             store_method: store_method(device_props, acc_stage),
         }
     }
