@@ -130,10 +130,8 @@ where
 
         let range = k_range.1 - k_range.0;
         let needed_stage_matmuls = range.div_ceil(stage_step);
-
-        // Algorithm assumes an even number of stages
-        let num_stage_matmuls = needed_stage_matmuls + (needed_stage_matmuls % 2);
-        let num_loops = num_stage_matmuls / 2;
+        let num_loops = needed_stage_matmuls / 2;
+        let has_tail = needed_stage_matmuls % 2 == 1;
 
         let stage_shared = config.stage_config.shared();
 
@@ -219,6 +217,13 @@ where
                 rhs_reader.advance_view();
                 phase ^= 1;
             }
+
+            if has_tail {
+                barrier_empty_a.wait_parity(phase ^ 1);
+                lhs_reader.load_stage(&barrier_full_a, StageBuffer::A, config.lhs_reader_config);
+                rhs_reader.load_stage(&barrier_full_a, StageBuffer::A, config.rhs_reader_config);
+                L::arrive::<MP>(&barrier_full_a, config);
+            }
         } else if role_rule.is_compute_plane() {
             let mut lhs_tile = init_a_fragment::<MP, SP::Scope>(stage_shared);
             let mut rhs_tile = init_b_fragments::<MP, SP::Scope>(stage_shared);
@@ -275,6 +280,25 @@ where
 
                 phase ^= 1;
             }
+
+            if has_tail {
+                barrier_full_a.wait_parity(phase);
+                acc.mma_partition::<
+                    LhsSE<MP>, LhsSS<MP>, LhsRE<MP>,
+                    RhsSE<MP>, RhsSS<MP>, RhsRE<MP>,
+                    NoEvent,
+                >(
+                    &lhs_stage_a_tile,
+                    &rhs_stage_a_tile,
+                    &mut lhs_tile,
+                    &mut rhs_tile,
+                    stage_shared.partition_size.k(),
+                    NoEvent::new(),
+                    &partition_scheduler,
+                );
+                barrier_empty_a.arrive();
+            }
+
             barrier_done.arrive_and_wait();
 
             lhs_reader.free_stage();

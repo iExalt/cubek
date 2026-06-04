@@ -31,6 +31,15 @@ fn f16_dtypes() -> MatmulElems {
     })
 }
 
+fn f32_dtypes() -> MatmulElems {
+    let f32 = f32::as_type_native_unchecked().storage_type();
+    MatmulElems::from_globals(&MatmulGlobalElems {
+        lhs: f32,
+        rhs: f32,
+        out: f32,
+    })
+}
+
 fn filled_tensor(
     client: &ComputeClient<CudaRuntime>,
     shape: Shape,
@@ -47,12 +56,33 @@ fn filled_tensor(
     )
 }
 
+fn filled_f32_tensor(
+    client: &ComputeClient<CudaRuntime>,
+    shape: Shape,
+    value: f32,
+) -> TensorHandle<CudaRuntime> {
+    let num_elements = shape.iter().product();
+    let values = vec![value; num_elements];
+    let layout = client.create_tensor_from_slice(f32::as_bytes(&values), shape.clone(), 4);
+    TensorHandle::new(
+        layout.memory,
+        shape,
+        layout.strides,
+        f32::as_type_native_unchecked(),
+    )
+}
+
 fn read_f16(client: &ComputeClient<CudaRuntime>, output: TensorHandle<CudaRuntime>) -> Vec<f32> {
     let bytes = client.read_one_unchecked_tensor(output.into_copy_descriptor());
     f16::from_bytes(&bytes)
         .iter()
         .map(|value| value.to_f32())
         .collect()
+}
+
+fn read_f32(client: &ComputeClient<CudaRuntime>, output: TensorHandle<CudaRuntime>) -> Vec<f32> {
+    let bytes = client.read_one_unchecked_tensor(output.into_copy_descriptor());
+    f32::from_bytes(&bytes).to_vec()
 }
 
 fn transposed_filled_tensor(
@@ -126,6 +156,42 @@ fn assert_strategy_parity(
             "{strategy} launch {launch_index} parity mismatches at {mismatches:?}; expected {expected}",
         );
     }
+}
+
+fn assert_f32_strategy_parity(
+    client: &ComputeClient<CudaRuntime>,
+    strategy: Strategy,
+    m: usize,
+    n: usize,
+    k: usize,
+) {
+    let lhs = filled_f32_tensor(client, shape![m, k], 1.0);
+    let rhs = filled_f32_tensor(client, shape![k, n], 1.0);
+    let out = filled_f32_tensor(client, shape![m, n], 0.0);
+    let dtype = f32::as_type_native_unchecked().storage_type();
+
+    launch_ref(
+        &strategy,
+        client,
+        InputBinding::Normal(lhs.binding(), dtype),
+        InputBinding::Normal(rhs.binding(), dtype),
+        out.clone().binding(),
+        &mut f32_dtypes(),
+    )
+    .unwrap_or_else(|error| panic!("{strategy} launch failed: {error:?}"));
+
+    let expected = k as f32;
+    let actual = read_f32(client, out);
+    let mismatches = actual
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| **value != expected)
+        .take(16)
+        .collect::<Vec<_>>();
+    assert!(
+        mismatches.is_empty(),
+        "{strategy} parity mismatches at {mismatches:?}; expected {expected}",
+    );
 }
 
 fn assert_strategy_rejects_oversized_tma_tile(
@@ -290,6 +356,50 @@ fn test_terminalo3_specialized_double_buffering_large_m_parity() {
         ] {
             assert_strategy_parity(&client, strategy, 2048, n, 256, false);
         }
+    }
+}
+
+#[test]
+fn test_terminalo3_specialized_double_buffering_medium_k_parity() {
+    let client = CudaRuntime::client(&Default::default());
+
+    for (m, k) in [(1885, 1568), (1024, 1568), (1024, 2048)] {
+        for strategy in [
+            Strategy::DoubleCyclicCmma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
+                specialized: true,
+                tile_matmul: TileMatmulKind::Cmma,
+            })),
+            Strategy::DoubleCyclicMma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
+                specialized: true,
+                tile_matmul: TileMatmulKind::Mma,
+            })),
+        ] {
+            assert_strategy_parity(&client, strategy, m, 512, k, false);
+        }
+    }
+}
+
+#[test]
+fn test_terminalo3_specialized_cyclic_medium_k_parity() {
+    let client = CudaRuntime::client(&Default::default());
+
+    for strategy in [
+        Strategy::SpecializedCyclicCmma(BlueprintStrategy::Inferred(().into())),
+        Strategy::SpecializedCyclicMma(BlueprintStrategy::Inferred(().into())),
+    ] {
+        assert_strategy_parity(&client, strategy, 1885, 512, 1568, false);
+    }
+}
+
+#[test]
+fn test_terminalo3_specialized_cyclic_odd_stage_f32_parity() {
+    let client = CudaRuntime::client(&Default::default());
+
+    for strategy in [
+        Strategy::SpecializedCyclicCmma(BlueprintStrategy::Inferred(().into())),
+        Strategy::SpecializedCyclicMma(BlueprintStrategy::Inferred(().into())),
+    ] {
+        assert_f32_strategy_parity(&client, strategy, 1885, 512, 1568);
     }
 }
 
