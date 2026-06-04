@@ -11,5 +11,18 @@ pub mod batch;
 mod base;
 mod selector;
 
+use crate::definition::{MatmulProblem, MatmulSetupError};
+
 pub use base::*;
 pub use selector::*;
+
+fn validate_vecmat_problem(problem: &MatmulProblem) -> Result<(), MatmulSetupError> {
+    if problem.m != 1 {
+        return Err(MatmulSetupError::InvalidConfig(Box::new(format!(
+            "m must equal 1 to qualify as a vecmat problem, got {}",
+            problem.m
+        ))));
+    }
+
+    Ok(())
+}

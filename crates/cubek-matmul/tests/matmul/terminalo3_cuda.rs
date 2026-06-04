@@ -113,6 +113,27 @@ fn assert_strategy_parity(
     }
 }
 
+fn assert_strategy_rejects_general_matmul(client: &ComputeClient<CudaRuntime>, strategy: Strategy) {
+    let lhs = filled_tensor(client, shape![256, 512], 1.0);
+    let rhs = filled_tensor(client, shape![512, 256], 1.0);
+    let out = filled_tensor(client, shape![256, 256], 0.0);
+    let dtype = f16::as_type_native_unchecked().storage_type();
+
+    let result = launch_ref(
+        &strategy,
+        client,
+        InputBinding::Normal(lhs.binding(), dtype),
+        InputBinding::Normal(rhs.binding(), dtype),
+        out.binding(),
+        &mut f16_dtypes(),
+    );
+
+    assert!(
+        result.is_err(),
+        "{strategy} accepted an incompatible general matmul problem"
+    );
+}
+
 #[test]
 fn test_terminalo3_naive_large_m_axis_parity() {
     let client = CudaRuntime::client(&Default::default());
@@ -249,5 +270,39 @@ fn test_terminalo3_tma_cmma_mma_output_reuse_parity() {
         Strategy::SpecializedTmaMma(BlueprintStrategy::Inferred(().into())),
     ] {
         assert_strategy_parity(&client, strategy, 256, 512, 256, false);
+    }
+}
+
+#[test]
+fn test_terminalo3_gemv_selector_parity() {
+    let client = CudaRuntime::client(&Default::default());
+
+    for strategy in [
+        Strategy::SimpleVecMat(Default::default()),
+        Strategy::DoubleVecMat(Default::default()),
+    ] {
+        assert_strategy_parity(&client, strategy, 1, 256, 256, true);
+    }
+
+    assert_strategy_parity(
+        &client,
+        Strategy::GemvUnitPerpendicular(Default::default()),
+        1,
+        256,
+        256,
+        false,
+    );
+}
+
+#[test]
+fn test_terminalo3_gemv_selectors_reject_general_matmul() {
+    let client = CudaRuntime::client(&Default::default());
+
+    for strategy in [
+        Strategy::SimpleVecMat(Default::default()),
+        Strategy::DoubleVecMat(Default::default()),
+        Strategy::GemvUnitPerpendicular(Default::default()),
+    ] {
+        assert_strategy_rejects_general_matmul(&client, strategy);
     }
 }
