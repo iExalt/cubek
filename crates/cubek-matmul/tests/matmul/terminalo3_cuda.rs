@@ -274,6 +274,26 @@ fn test_terminalo3_cyclic_cmma_mma_output_reuse_parity() {
 }
 
 #[test]
+fn test_terminalo3_specialized_double_buffering_large_m_parity() {
+    let client = CudaRuntime::client(&Default::default());
+
+    for n in [512, 264] {
+        for strategy in [
+            Strategy::DoubleCyclicCmma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
+                specialized: true,
+                tile_matmul: TileMatmulKind::Cmma,
+            })),
+            Strategy::DoubleCyclicMma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
+                specialized: true,
+                tile_matmul: TileMatmulKind::Mma,
+            })),
+        ] {
+            assert_strategy_parity(&client, strategy, 2048, n, 256, false);
+        }
+    }
+}
+
+#[test]
 fn test_terminalo3_cyclic_large_m_axis_parity() {
     let client = CudaRuntime::client(&Default::default());
 
