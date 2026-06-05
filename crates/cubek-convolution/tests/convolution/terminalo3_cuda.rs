@@ -24,6 +24,15 @@ const FORWARD_WEIGHT_VALUE: f32 = 0.25;
 const WGRAD_INPUT_VALUE: f32 = 0.25;
 const WGRAD_OUT_GRAD_VALUE: f32 = 0.25;
 
+fn f32_dtypes() -> MatmulElems {
+    let f32 = f32::as_type_native_unchecked().storage_type();
+    MatmulElems::from_globals(&MatmulGlobalElems {
+        lhs: f32,
+        rhs: f32,
+        out: f32,
+    })
+}
+
 fn f16_dtypes() -> MatmulElems {
     let f16 = f16::as_type_native_unchecked().storage_type();
     MatmulElems::from_globals(&MatmulGlobalElems {
@@ -60,6 +69,21 @@ fn learner_cmma_case() -> ConvolutionCase {
         padding: [0, 0],
         dilation: [1, 1],
         has_bias: true,
+    }
+}
+
+fn learner_wgrad_case() -> ConvolutionCase {
+    ConvolutionCase {
+        batches: 8,
+        in_h: 32,
+        in_w: 32,
+        in_channels: 256,
+        out_channels: 64,
+        kernel_size: [3, 3],
+        stride: [1, 1],
+        padding: [1, 1],
+        dilation: [1, 1],
+        has_bias: false,
     }
 }
 
@@ -128,6 +152,23 @@ fn zeros_tensor(client: &ComputeClient<CudaRuntime>, shape: Shape) -> TensorHand
     tensor_from_f32(client, shape, vec![0.0; num_elements])
 }
 
+fn filled_tensor_f32(
+    client: &ComputeClient<CudaRuntime>,
+    shape: Shape,
+    value: f32,
+) -> TensorHandle<CudaRuntime> {
+    let num_elements = shape.iter().product();
+    tensor_from_f32_native(client, shape, vec![value; num_elements])
+}
+
+fn zeros_tensor_f32(
+    client: &ComputeClient<CudaRuntime>,
+    shape: Shape,
+) -> TensorHandle<CudaRuntime> {
+    let num_elements = shape.iter().product();
+    tensor_from_f32_native(client, shape, vec![0.0; num_elements])
+}
+
 fn tensor_from_f32(
     client: &ComputeClient<CudaRuntime>,
     shape: Shape,
@@ -140,6 +181,20 @@ fn tensor_from_f32(
         shape,
         layout.strides,
         f16::as_type_native_unchecked(),
+    )
+}
+
+fn tensor_from_f32_native(
+    client: &ComputeClient<CudaRuntime>,
+    shape: Shape,
+    values: Vec<f32>,
+) -> TensorHandle<CudaRuntime> {
+    let layout = client.create_tensor_from_slice(f32::as_bytes(&values), shape.clone(), 4);
+    TensorHandle::new(
+        layout.memory,
+        shape,
+        layout.strides,
+        f32::as_type_native_unchecked(),
     )
 }
 
@@ -166,19 +221,28 @@ fn read_f16(client: &ComputeClient<CudaRuntime>, output: TensorHandle<CudaRuntim
         .collect()
 }
 
+fn read_f32(client: &ComputeClient<CudaRuntime>, output: TensorHandle<CudaRuntime>) -> Vec<f32> {
+    let bytes = client.read_one_unchecked_tensor(output.into_copy_descriptor());
+    f32::from_bytes(&bytes).to_vec()
+}
+
 fn assert_close(actual: &[f32], expected: &[f32]) {
+    assert_close_with_tolerance(actual, expected, TOLERANCE);
+}
+
+fn assert_close_with_tolerance(actual: &[f32], expected: &[f32], tolerance: f32) {
     assert_eq!(actual.len(), expected.len());
     let mismatches = actual
         .iter()
         .zip(expected)
         .enumerate()
-        .filter(|(_, (actual, expected))| (*actual - *expected).abs() > TOLERANCE)
+        .filter(|(_, (actual, expected))| (*actual - *expected).abs() > tolerance)
         .take(16)
         .map(|(index, (actual, expected))| (index, actual, expected))
         .collect::<Vec<_>>();
     assert!(
         mismatches.is_empty(),
-        "Parity mismatches at {mismatches:?}; tolerance={TOLERANCE}",
+        "Parity mismatches at {mismatches:?}; tolerance={tolerance}",
     );
 }
 
@@ -366,6 +430,35 @@ fn assert_backward_weight_parity(
     }
 }
 
+fn assert_backward_weight_f32_parity(
+    case: &ConvolutionCase,
+    algorithm: ConvAlgorithm,
+    tile_kind: AcceleratedTileKind,
+) {
+    let client = CudaRuntime::client(&Default::default());
+    let dtypes = f32_dtypes();
+    let input = filled_tensor_f32(&client, input_shape(case), WGRAD_INPUT_VALUE);
+    let out_grad = filled_tensor_f32(&client, output_shape(case), WGRAD_OUT_GRAD_VALUE);
+    let expected = expected_backward_weight(case);
+
+    for _ in 0..REPETITIONS {
+        let weight_grad = zeros_tensor_f32(&client, weight_shape(case));
+        launch_ref(
+            &strategy(algorithm, tile_kind),
+            &client,
+            ConvolutionInputs::BackwardWeight {
+                input: InputBinding::new(input.clone().binding(), dtypes.lhs_global),
+                out_grad: InputBinding::new(out_grad.clone().binding(), dtypes.rhs_global),
+                weight_grad: weight_grad.clone().binding(),
+            },
+            args(case),
+            dtypes.clone(),
+        )
+        .unwrap();
+        assert_close_with_tolerance(&read_f32(&client, weight_grad), &expected, 1.0e-2);
+    }
+}
+
 #[test]
 fn test_terminalo3_forward_simple_async_tma_mma_parity() {
     assert_forward_parity(
@@ -382,6 +475,41 @@ fn test_terminalo3_forward_simple_async_tma_mma_compact_parity() {
         ConvAlgorithm::SimpleAsyncTma,
         AcceleratedTileKind::Mma,
     );
+}
+
+#[test]
+fn test_terminalo3_forward_specialized_tma_mma_parity() {
+    assert_forward_parity(
+        &rollout_case(),
+        ConvAlgorithm::SpecializedTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_forward_specialized_tma_mma_compact_parity() {
+    assert_forward_parity(
+        &compact_case(),
+        ConvAlgorithm::SpecializedTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_forward_specialized_async_parity() {
+    let case = compact_case();
+    for (algorithm, tile_kind) in [
+        (
+            ConvAlgorithm::SpecializedAsyncCyclic,
+            AcceleratedTileKind::Cmma,
+        ),
+        (
+            ConvAlgorithm::SpecializedAsyncStrided,
+            AcceleratedTileKind::Mma,
+        ),
+    ] {
+        assert_forward_parity(&case, algorithm, tile_kind);
+    }
 }
 
 #[test]
@@ -522,5 +650,18 @@ fn test_terminalo3_backward_weight_non_tma_implicit_gemm_parity() {
         (ConvAlgorithm::SimpleAsyncStrided, AcceleratedTileKind::Mma),
     ] {
         assert_backward_weight_parity(&case, algorithm, tile_kind);
+    }
+}
+
+#[test]
+fn test_terminalo3_backward_weight_non_tma_implicit_gemm_f32_learner_parity() {
+    let case = learner_wgrad_case();
+    for (algorithm, tile_kind) in [
+        (ConvAlgorithm::SimpleSyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleSyncStrided, AcceleratedTileKind::Mma),
+        (ConvAlgorithm::SimpleAsyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleAsyncStrided, AcceleratedTileKind::Mma),
+    ] {
+        assert_backward_weight_f32_parity(&case, algorithm, tile_kind);
     }
 }
