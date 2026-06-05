@@ -138,14 +138,12 @@ where
 
         let range = k_range.1 - k_range.0;
         let needed_stage_matmuls = range.div_ceil(stage_step);
+        let num_loops = (needed_stage_matmuls - 1) / 2;
+        let has_tail = needed_stage_matmuls % 2 == 1;
 
         let stage_shared = config.stage_config.shared();
 
         let mut acc = init_accumulator::<MP, SP::Scope>(stage_shared);
-
-        // Algorithm assumes an even number of stages
-        let num_stage_matmuls = needed_stage_matmuls + (needed_stage_matmuls % 2);
-        let num_loops = (num_stage_matmuls - 2) / 2;
 
         let mut lhs_tile = init_a_fragment::<MP, SP::Scope>(stage_shared);
         let mut rhs_tile = init_b_fragments::<MP, SP::Scope>(stage_shared);
@@ -274,41 +272,55 @@ where
             LL::SyncStrategy::sync::<MP>(&barrier_a, config);
         }
 
-        execute_current_and_read_next::<
-            MP,
-            SP,
-            LL::SyncStrategy,
-            Self::LhsGlobalReader<'_>,
-            Self::RhsGlobalReader<'_>,
-            Self::Config,
-        >(
-            &lhs_stage_a_tile,
-            &rhs_stage_a_tile,
-            &mut lhs_tile,
-            &mut rhs_tile,
-            &mut acc,
-            &mut lhs_reader,
-            &mut rhs_reader,
-            &barrier_b,
-            &specializer,
-            &partition_scheduler,
-            StageBuffer::B,
-            config,
-        );
+        if has_tail {
+            execute_last_and_write_results::<MP, Self::GlobalWriter<'_>, SP, Self::Config>(
+                &lhs_stage_a_tile,
+                &rhs_stage_a_tile,
+                &mut lhs_tile,
+                &mut rhs_tile,
+                &mut acc,
+                &mut out_writer,
+                &specializer,
+                &partition_scheduler,
+                config,
+            );
+        } else {
+            execute_current_and_read_next::<
+                MP,
+                SP,
+                LL::SyncStrategy,
+                Self::LhsGlobalReader<'_>,
+                Self::RhsGlobalReader<'_>,
+                Self::Config,
+            >(
+                &lhs_stage_a_tile,
+                &rhs_stage_a_tile,
+                &mut lhs_tile,
+                &mut rhs_tile,
+                &mut acc,
+                &mut lhs_reader,
+                &mut rhs_reader,
+                &barrier_b,
+                &specializer,
+                &partition_scheduler,
+                StageBuffer::B,
+                config,
+            );
 
-        LL::SyncStrategy::sync::<MP>(&barrier_b, config);
+            LL::SyncStrategy::sync::<MP>(&barrier_b, config);
 
-        execute_last_and_write_results::<MP, Self::GlobalWriter<'_>, SP, Self::Config>(
-            &lhs_stage_b_tile,
-            &rhs_stage_b_tile,
-            &mut lhs_tile,
-            &mut rhs_tile,
-            &mut acc,
-            &mut out_writer,
-            &specializer,
-            &partition_scheduler,
-            config,
-        );
+            execute_last_and_write_results::<MP, Self::GlobalWriter<'_>, SP, Self::Config>(
+                &lhs_stage_b_tile,
+                &rhs_stage_b_tile,
+                &mut lhs_tile,
+                &mut rhs_tile,
+                &mut acc,
+                &mut out_writer,
+                &specializer,
+                &partition_scheduler,
+                config,
+            );
+        }
     }
 
     fn init_lhs_global_reader(

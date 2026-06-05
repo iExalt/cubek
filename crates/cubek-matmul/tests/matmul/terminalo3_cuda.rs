@@ -363,7 +363,7 @@ fn test_terminalo3_specialized_double_buffering_large_m_parity() {
 fn test_terminalo3_specialized_double_buffering_medium_k_parity() {
     let client = CudaRuntime::client(&Default::default());
 
-    for (m, k) in [(1885, 1568), (1024, 1568), (1024, 2048)] {
+    for (m, k) in [(1862, 1568), (1885, 1568), (1024, 1568), (1024, 2048)] {
         for strategy in [
             Strategy::DoubleCyclicCmma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
                 specialized: true,
@@ -376,6 +376,58 @@ fn test_terminalo3_specialized_double_buffering_medium_k_parity() {
         ] {
             assert_strategy_parity(&client, strategy, m, 512, k, false);
         }
+    }
+}
+
+#[test]
+fn test_terminalo3_specialized_double_buffering_odd_stage_tail_reuse_parity() {
+    let client = CudaRuntime::client(&Default::default());
+    let strategy = Strategy::DoubleCyclicMma(BlueprintStrategy::Inferred(DoubleBufferingArgs {
+        specialized: true,
+        tile_matmul: TileMatmulKind::Mma,
+    }));
+
+    for _ in 0..8 {
+        assert_strategy_parity(&client, strategy.clone(), 1862, 512, 1568, false);
+    }
+}
+
+#[test]
+fn test_terminalo3_ordered_double_buffering_medium_k_parity() {
+    let client = CudaRuntime::client(&Default::default());
+
+    for m in [1862, 1885] {
+        for strategy in [
+            Strategy::OrderedDoubleCmma(BlueprintStrategy::Inferred(OrderedSelectionArgs {
+                partition_k: Some(2),
+                row_count: Some(8),
+                rows_per_plane: Some(2),
+                tile_matmul: TileMatmulKind::Cmma,
+            })),
+            Strategy::OrderedDoubleMma(BlueprintStrategy::Inferred(OrderedSelectionArgs {
+                partition_k: Some(2),
+                row_count: Some(8),
+                rows_per_plane: Some(2),
+                tile_matmul: TileMatmulKind::Mma,
+            })),
+        ] {
+            assert_strategy_parity(&client, strategy, m, 512, 1568, false);
+        }
+    }
+}
+
+#[test]
+fn test_terminalo3_ordered_double_buffering_odd_stage_tail_reuse_parity() {
+    let client = CudaRuntime::client(&Default::default());
+    let strategy = Strategy::OrderedDoubleCmma(BlueprintStrategy::Inferred(OrderedSelectionArgs {
+        partition_k: Some(2),
+        row_count: Some(8),
+        rows_per_plane: Some(2),
+        tile_matmul: TileMatmulKind::Cmma,
+    }));
+
+    for _ in 0..8 {
+        assert_strategy_parity(&client, strategy.clone(), 1862, 512, 1568, false);
     }
 }
 
