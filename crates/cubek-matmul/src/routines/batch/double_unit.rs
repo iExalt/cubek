@@ -63,6 +63,8 @@ impl<RC: RuntimeConfig> Routine<RC> for DoubleUnitAlgorithm {
 }
 
 impl<RC: RuntimeConfig> BatchMatmulRoutine<RC> for DoubleUnitAlgorithm {
+    type BatchMatmul = DoubleUnitBatch<RC>;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = RC>, R: Runtime>(
         client: &ComputeClient<R>,

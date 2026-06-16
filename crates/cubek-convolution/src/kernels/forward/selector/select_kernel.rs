@@ -8,6 +8,7 @@ use cubecl::{
 };
 use cubek_matmul::{
     args::{InputArg, OutputArg},
+    components::batch::BatchMatmulFamily,
     routines::BlueprintStrategy,
 };
 use cubek_matmul::{

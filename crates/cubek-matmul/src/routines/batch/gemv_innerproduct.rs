@@ -84,6 +84,8 @@ impl<RC: RuntimeConfig> Routine<RC> for VecMatInnerProductAlgorithm {
 }
 
 impl<RC: RuntimeConfig> BatchMatmulRoutine<RC> for VecMatInnerProductAlgorithm {
+    type BatchMatmul = VecMatBatch<RC>;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = RC>, R: Runtime>(
         client: &ComputeClient<R>,
@@ -144,7 +146,7 @@ impl<RC: RuntimeConfig> BatchMatmulRoutine<RC> for VecMatInnerProductAlgorithm {
         device_settings: &DeviceSettings<R>,
         strategy: &BlueprintStrategy<RC, Self>,
     ) -> Result<ExpandInfo<Self::Blueprint>, MatmulSetupError> {
-        super::validate_vecmat_problem(problem)?;
+        crate::routines::validate_vecmat_problem(problem)?;
 
         let mut dtypes = MatmulElems::from_globals(&problem.global_dtypes);
 
@@ -213,6 +215,8 @@ impl<RC: RuntimeConfig> Routine<RC> for DoubleVecMatInnerProductAlgorithm {
 }
 
 impl<RC: RuntimeConfig> BatchMatmulRoutine<RC> for DoubleVecMatInnerProductAlgorithm {
+    type BatchMatmul = DoubleVecMatBatch<RC>;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = RC>, R: Runtime>(
         client: &ComputeClient<R>,
@@ -273,7 +277,7 @@ impl<RC: RuntimeConfig> BatchMatmulRoutine<RC> for DoubleVecMatInnerProductAlgor
         device_settings: &DeviceSettings<R>,
         strategy: &BlueprintStrategy<RC, Self>,
     ) -> Result<ExpandInfo<Self::Blueprint>, MatmulSetupError> {
-        super::validate_vecmat_problem(problem)?;
+        crate::routines::validate_vecmat_problem(problem)?;
 
         let mut dtypes = MatmulElems::from_globals(&problem.global_dtypes);
 

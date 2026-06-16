@@ -19,9 +19,7 @@ use crate::components::global::memory::{
     SimpleTmaGlobalLayoutLaunch,
 };
 use crate::{
-    definition::{
-        Blueprint as _, MatmulElems, MatmulProblem, MatmulSetupError, MatmulVectorSizes,
-    },
+    definition::{Blueprint, MatmulElems, MatmulProblem, MatmulSetupError, MatmulVectorSizes},
     routines::BatchMatmulRoutine,
 };
 

@@ -15,8 +15,7 @@ use crate::{
         stage::NumStages,
     },
     definition::{
-        CubeMappingLaunch, MatmulAvailabilityError, MatmulElems, MatmulProblem, MatmulSetupError,
-        MatmulVectorSizes,
+        CubeMappingLaunch, MatmulElems, MatmulProblem, MatmulSetupError, MatmulVectorSizes,
     },
     routines::{
         BatchMatmulRoutine, BlueprintStrategy, DeviceSettings, ExpandInfo, LaunchInfo, Routine,
@@ -47,6 +46,8 @@ impl Routine<()> for NaiveRoutine {
 }
 
 impl BatchMatmulRoutine<()> for NaiveRoutine {
+    type BatchMatmul = NaiveBatchMatmulFamily;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = ()>, R: Runtime>(
         client: &ComputeClient<R>,

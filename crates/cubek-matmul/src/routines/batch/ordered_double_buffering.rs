@@ -96,6 +96,8 @@ impl<RC> BatchMatmulRoutine<RC> for OrderedDoubleBufferingAlgorithm
 where
     RC: RuntimeConfig,
 {
+    type BatchMatmul = OrderedDoubleBufferingBatch<RC>;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = RC>, R: Runtime>(
         client: &ComputeClient<R>,

@@ -95,6 +95,8 @@ macro_rules! double_buffering_impl {
         where
             RC: RuntimeConfig,
         {
+            type BatchMatmul = $batch;
+
             #[allow(clippy::too_many_arguments, clippy::result_large_err)]
             fn launch<MA: MatmulArgs<Config = RC>, R: Runtime>(
                 client: &ComputeClient<R>,

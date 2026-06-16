@@ -47,6 +47,8 @@ impl Routine<()> for GemvUnitPerpendicularRoutine {
 }
 
 impl BatchMatmulRoutine<()> for GemvUnitPerpendicularRoutine {
+    type BatchMatmul = VecMatUnitPerpendicularFamily;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = ()>, R: Runtime>(
         client: &ComputeClient<R>,

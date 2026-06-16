@@ -87,6 +87,8 @@ where
     RL: FullLoadingStrategy<RC, SyncStrategy = LL::SyncStrategy>,
     AL: FullLoadingStrategy<RC, SyncStrategy = LL::SyncStrategy>,
 {
+    type BatchMatmul = InterleavedBatch<RC, LL, RL, AL>;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = RC>, R: Runtime>(
         client: &ComputeClient<R>,

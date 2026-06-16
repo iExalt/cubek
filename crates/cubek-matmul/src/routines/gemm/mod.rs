@@ -58,6 +58,8 @@ impl Routine<()> for GemmRoutine {
 }
 
 impl BatchMatmulRoutine<()> for GemmRoutine {
+    type BatchMatmul = GemmFamily;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = ()>, R: Runtime>(
         client: &ComputeClient<R>,

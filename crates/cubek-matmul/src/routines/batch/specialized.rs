@@ -104,6 +104,8 @@ where
     L: AsyncPartialLoadingStrategy<RC, Stage: StageFamily>,
     AL: FullLoadingStrategy<RC, Stage: StageFamily>,
 {
+    type BatchMatmul = SpecializedBatch<RC, L, AL>;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = RC>, R: Runtime>(
         client: &ComputeClient<R>,

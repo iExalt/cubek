@@ -22,6 +22,8 @@ pub trait Routine<RC: RuntimeConfig>: Sized {
 
 /// The launch pipeline for matmuls with a batch matmul (might become legacy)
 pub trait BatchMatmulRoutine<RC: RuntimeConfig>: Routine<RC, Blueprint: Blueprint> {
+    type BatchMatmul: BatchMatmulFamily<RC, Blueprint = Self::Blueprint>;
+
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
     fn launch<MA: MatmulArgs<Config = RC>, R: Runtime>(
         client: &ComputeClient<R>,
