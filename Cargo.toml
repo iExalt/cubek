@@ -12,7 +12,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 rust-version = "1.92"
-version = "0.3.0-pre.4"
+version = "0.3.0-pre.5"
 
 [workspace.dependencies]
 ### For local development. ###
@@ -20,8 +20,8 @@ version = "0.3.0-pre.4"
 # cubecl-common = { path = "../cubecl/crates/cubecl-common", default-features = false }
 
 ### For the main cubek branch. ###
-cubecl = { git = "https://github.com/iExalt/cubecl", rev = "ec9308ca4f1fe9fb5642b4746377ab35493074b0", default-features = false }
-cubecl-common = { git = "https://github.com/iExalt/cubecl", rev = "ec9308ca4f1fe9fb5642b4746377ab35493074b0", default-features = false }
+cubecl = { git = "https://github.com/iExalt/cubecl", rev = "4eb99c4085884c6552a57571d85976ee35163c34", default-features = false }
+cubecl-common = { git = "https://github.com/iExalt/cubecl", rev = "4eb99c4085884c6552a57571d85976ee35163c34", default-features = false }
 
 ### For releases ###
 # cubecl = { version = "0.10.0", default-features = false }

@@ -21,11 +21,11 @@ full = ["extended"]
 bytemuck = { workspace = true }
 cubecl = { workspace = true, features = ["stdlib", "test-runtime"] }
 cubecl-common = { workspace = true }
-cubek-layout = { path = "../cubek-layout", version = "=0.3.0-pre.4" }
+cubek-layout = { path = "../cubek-layout", version = "=0.3.0-pre.5" }
 half = { workspace = true, features = ["bytemuck"] }
 serde = { workspace = true }
 
 [dev-dependencies]
-cubek-test-utils = { path = "./../cubek-test-utils/", version = "=0.3.0-pre.4", default-features = false }
+cubek-test-utils = { path = "./../cubek-test-utils/", version = "=0.3.0-pre.5", default-features = false }
 pretty_assertions = { workspace = true }
 trybuild = "1"
