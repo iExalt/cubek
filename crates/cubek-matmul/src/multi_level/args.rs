@@ -517,64 +517,6 @@ fn validate_tma_tile_shape(
     Ok(())
 }
 
-#[cfg(test)]
-mod tma_tests {
-    use super::*;
-
-    fn tiling_scheme() -> crate::multi_level::definition::TilingScheme {
-        crate::multi_level::definition::TilingScheme::builder()
-            .with_tile_size((8, 16, 4).into())
-            .with_partition_size((2, 1, 1).into())
-            .with_stage_size((2, 1, 1).into())
-            .build()
-            .unwrap()
-    }
-
-    #[test]
-    fn tma_box_shapes_follow_layout_and_swizzle() {
-        let none = SwizzleModes {
-            lhs: SwizzleMode::None,
-            rhs: SwizzleMode::None,
-            ..Default::default()
-        };
-        assert_eq!(
-            tma_box_shapes(
-                tiling_scheme(),
-                none,
-                MatrixLayout::RowMajor,
-                MatrixLayout::ColMajor,
-            ),
-            ((32, 4), (4, 16))
-        );
-
-        let swizzled = SwizzleModes {
-            lhs: SwizzleMode::B32,
-            rhs: SwizzleMode::B64,
-            ..Default::default()
-        };
-        assert_eq!(
-            tma_box_shapes(
-                tiling_scheme(),
-                swizzled,
-                MatrixLayout::ColMajor,
-                MatrixLayout::RowMajor,
-            ),
-            ((32, 4), (4, 16))
-        );
-    }
-
-    #[test]
-    fn tma_tile_shape_validation_enforces_descriptor_bounds() {
-        for (rows, cols) in [(1, 1), (256, 256), (1, 256), (256, 1)] {
-            assert!(validate_tma_tile_shape("operand", (rows, cols)).is_ok());
-        }
-        for shape in [(0, 1), (1, 0), (257, 1), (1, 257), (257, 257)] {
-            let error = validate_tma_tile_shape("operand", shape).unwrap_err();
-            assert!(format!("{error:?}").contains("operand TMA tile shape"));
-        }
-    }
-}
-
 #[cube]
 impl<Config: RuntimeConfig> MatmulArgs for TensorMapArgs<Config> {
     type Input<Lhs: CubePrimitive, Rhs: CubePrimitive, EO: CubePrimitive> =
@@ -656,5 +598,73 @@ impl<Config: RuntimeConfig> MatmulArgs for TensorMapArgs<Config> {
         state: &Self::State<Lhs, Rhs, EO>,
     ) -> Self::Config {
         state.2.clone()
+    }
+}
+
+#[cfg(test)]
+mod tma_tests {
+    use super::*;
+
+    fn tiling_scheme() -> crate::multi_level::definition::TilingScheme {
+        crate::multi_level::definition::TilingScheme::builder()
+            .with_tile_size((8, 16, 4).into())
+            .with_partition_size((2, 2, 2).into())
+            .with_stage_size((2, 2, 1).into())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn tma_box_shapes_follow_layout_and_swizzle() {
+        let none = SwizzleModes {
+            lhs: SwizzleMode::None,
+            rhs: SwizzleMode::None,
+            ..Default::default()
+        };
+        assert_eq!(
+            tma_box_shapes(
+                tiling_scheme(),
+                none,
+                MatrixLayout::RowMajor,
+                MatrixLayout::RowMajor,
+            ),
+            ((32, 4), (8, 16))
+        );
+
+        assert_eq!(
+            tma_box_shapes(
+                tiling_scheme(),
+                none,
+                MatrixLayout::ColMajor,
+                MatrixLayout::ColMajor,
+            ),
+            ((8, 8), (4, 64))
+        );
+
+        let swizzled = SwizzleModes {
+            lhs: SwizzleMode::B32,
+            rhs: SwizzleMode::B64,
+            ..Default::default()
+        };
+        assert_eq!(
+            tma_box_shapes(
+                tiling_scheme(),
+                swizzled,
+                MatrixLayout::ColMajor,
+                MatrixLayout::RowMajor,
+            ),
+            ((32, 8), (8, 64))
+        );
+    }
+
+    #[test]
+    fn tma_tile_shape_validation_enforces_descriptor_bounds() {
+        for (rows, cols) in [(1, 1), (256, 256), (1, 256), (256, 1)] {
+            assert!(validate_tma_tile_shape("operand", (rows, cols)).is_ok());
+        }
+        for shape in [(0, 1), (1, 0), (257, 1), (1, 257), (257, 257)] {
+            let error = validate_tma_tile_shape("operand", shape).unwrap_err();
+            assert!(format!("{error:?}").contains("operand TMA tile shape"));
+        }
     }
 }
