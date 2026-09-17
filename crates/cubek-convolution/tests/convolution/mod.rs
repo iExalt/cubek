@@ -12,5 +12,7 @@ pub mod full;
 
 pub mod launcher_strategy;
 
+mod forward_bias;
+
 #[cfg(feature = "cuda-tests")]
 mod terminalo3_cuda;
