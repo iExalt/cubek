@@ -84,13 +84,6 @@ pub fn launch_ref<const N_SPATIAL: usize>(
         }
     };
 
-    // Backward-data does not currently support the TMA reading strategy.
-    if inputs.operation() == ConvolutionOperation::BackwardData
-        && algorithm == ConvAlgorithm::SimpleAsyncTma
-    {
-        return Err(crate::kernels::backward_data::launch::unsupported_tma_error());
-    }
-
     dispatch_routine::<N_SPATIAL>(
         algorithm,
         tile_kind,
