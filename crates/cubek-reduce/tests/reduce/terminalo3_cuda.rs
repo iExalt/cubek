@@ -1,10 +1,11 @@
 //! CUDA parity regressions extracted from TerminalO3 autotune artifacts.
 
 use cubecl::{
-    CubeElement, Runtime,
-    client::ComputeClient,
-    cuda::CudaRuntime,
-    prelude::CubePrimitive,
+    CubeElement, Device,
+    client::Client,
+    config::autotune::AutotuneLevel,
+    device::CudaDevice,
+    frontend::Scalar,
     std::tensor::TensorHandle,
     zspace::{Shape, shape},
 };
@@ -18,19 +19,19 @@ use cubek_reduce::{
 };
 use half::f16;
 
+fn cuda_client() -> Client {
+    Device::Cuda(CudaDevice::default()).client()
+}
+
 fn f16_dtypes() -> ReduceDtypes {
     ReduceDtypes {
-        input: f16::as_type_native_unchecked().storage_type(),
-        output: f16::as_type_native_unchecked().storage_type(),
-        accumulation: f32::as_type_native_unchecked().storage_type(),
+        input: f16::elem_type_native(),
+        output: f16::elem_type_native(),
+        accumulation: f32::elem_type_native(),
     }
 }
 
-fn filled_f16_tensor(
-    client: &ComputeClient<CudaRuntime>,
-    shape: Shape,
-    value: f32,
-) -> TensorHandle<CudaRuntime> {
+fn filled_f16_tensor(client: &Client, shape: Shape, value: f32) -> TensorHandle {
     let num_elements = shape.iter().product();
     let values = vec![f16::from_f32(value); num_elements];
     let layout = client.create_tensor_from_slice(f16::as_bytes(&values), shape.clone(), 2);
@@ -38,15 +39,11 @@ fn filled_f16_tensor(
         layout.memory,
         shape,
         layout.strides,
-        f16::as_type_native_unchecked(),
+        f16::elem_type_native(),
     )
 }
 
-fn filled_f32_tensor(
-    client: &ComputeClient<CudaRuntime>,
-    shape: Shape,
-    value: f32,
-) -> TensorHandle<CudaRuntime> {
+fn filled_f32_tensor(client: &Client, shape: Shape, value: f32) -> TensorHandle {
     let num_elements = shape.iter().product();
     let values = vec![value; num_elements];
     let layout = client.create_tensor_from_slice(f32::as_bytes(&values), shape.clone(), 4);
@@ -54,11 +51,11 @@ fn filled_f32_tensor(
         layout.memory,
         shape,
         layout.strides,
-        f32::as_type_native_unchecked(),
+        f32::elem_type_native(),
     )
 }
 
-fn read_f16(client: &ComputeClient<CudaRuntime>, output: TensorHandle<CudaRuntime>) -> Vec<f32> {
+fn read_f16(client: &Client, output: TensorHandle) -> Vec<f32> {
     let bytes = client.read_one_unchecked_tensor(output.into_copy_descriptor());
     f16::from_bytes(&bytes)
         .iter()
@@ -66,7 +63,7 @@ fn read_f16(client: &ComputeClient<CudaRuntime>, output: TensorHandle<CudaRuntim
         .collect()
 }
 
-fn read_f32(client: &ComputeClient<CudaRuntime>, output: TensorHandle<CudaRuntime>) -> Vec<f32> {
+fn read_f32(client: &Client, output: TensorHandle) -> Vec<f32> {
     let bytes = client.read_one_unchecked_tensor(output.into_copy_descriptor());
     f32::from_bytes(&bytes).to_vec()
 }
@@ -79,6 +76,7 @@ fn output_shape(input_shape: &Shape, axis: usize) -> Shape {
 
 fn unit_strategy(vectorized_output: bool) -> ReduceStrategy {
     ReduceStrategy {
+        autotune_level: AutotuneLevel::Full,
         routine: RoutineStrategy::Unit(BlueprintStrategy::Inferred(UnitStrategy)),
         vectorization: VectorizationStrategy {
             parallel_output_vectorization: vectorized_output,
@@ -88,6 +86,7 @@ fn unit_strategy(vectorized_output: bool) -> ReduceStrategy {
 
 fn plane_strategy(vectorized_output: bool) -> ReduceStrategy {
     ReduceStrategy {
+        autotune_level: AutotuneLevel::Full,
         routine: RoutineStrategy::Plane(BlueprintStrategy::Inferred(PlaneStrategy {
             independent: true,
         })),
@@ -99,6 +98,7 @@ fn plane_strategy(vectorized_output: bool) -> ReduceStrategy {
 
 fn cube_strategy(vectorized_output: bool) -> ReduceStrategy {
     ReduceStrategy {
+        autotune_level: AutotuneLevel::Full,
         routine: RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
             use_planes: true,
         })),
@@ -108,16 +108,11 @@ fn cube_strategy(vectorized_output: bool) -> ReduceStrategy {
     }
 }
 
-fn assert_reduce_dim_sum(
-    client: &ComputeClient<CudaRuntime>,
-    shape: Shape,
-    axis: usize,
-    strategy: ReduceStrategy,
-) {
+fn assert_reduce_dim_sum(client: &Client, shape: Shape, axis: usize, strategy: ReduceStrategy) {
     let input = filled_f16_tensor(client, shape.clone(), 1.0);
     let output = filled_f16_tensor(client, output_shape(&shape, axis), 0.0);
 
-    reduce::<CudaRuntime>(
+    reduce(
         client,
         input.binding(),
         output.clone().binding(),
@@ -144,8 +139,8 @@ fn assert_reduce_dim_sum(
 
 #[test]
 fn test_terminalo3_sum_one_shot_parity() {
-    let client = CudaRuntime::client(&Default::default());
-    let dtype = f32::as_type_native_unchecked().elem_type();
+    let client = cuda_client();
+    let dtype = f32::elem_type_native();
 
     for (length, cube_count) in [
         (16, 1),
@@ -178,12 +173,12 @@ fn test_terminalo3_sum_one_shot_parity() {
 
 #[test]
 fn test_terminalo3_sum_chained_parity() {
-    let client = CudaRuntime::client(&Default::default());
+    let client = cuda_client();
     let mut input = filled_f16_tensor(&client, shape![8, 16, 4], 1.0);
 
     for axis in [2, 0, 1] {
         let output = filled_f16_tensor(&client, output_shape(input.shape(), axis), 0.0);
-        reduce::<CudaRuntime>(
+        reduce(
             &client,
             input.binding(),
             output.clone().binding(),
@@ -201,7 +196,7 @@ fn test_terminalo3_sum_chained_parity() {
 
 #[test]
 fn test_terminalo3_reduce_dim_routine_parity() {
-    let client = CudaRuntime::client(&Default::default());
+    let client = cuda_client();
 
     for strategy in [
         unit_strategy(false),
@@ -215,7 +210,7 @@ fn test_terminalo3_reduce_dim_routine_parity() {
 
 #[test]
 fn test_terminalo3_reduce_dim_vectorized_output_parity() {
-    let client = CudaRuntime::client(&Default::default());
+    let client = cuda_client();
 
     for strategy in [
         unit_strategy(true),
