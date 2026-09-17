@@ -3,6 +3,9 @@
 mod basic;
 mod bias;
 
+#[cfg(feature = "cuda-tests")]
+mod terminalo3_cuda;
+
 #[cfg(feature = "benchmarks")]
 mod bench_catalog;
 #[cfg(feature = "benchmarks")]

@@ -1,0 +1,696 @@
+//! CUDA parity regressions extracted from TerminalO3 autotune artifacts.
+
+use cubecl::{
+    Device,
+    cuda::CudaDevice,
+    frontend::Scalar,
+    prelude::*,
+    std::tensor::TensorHandle,
+    zspace::{Shape, Strides, shape},
+};
+use cubek_convolution::{
+    AcceleratedTileKind, ConvAlgorithm, ConvolutionArgs, ConvolutionInputs, Strategy, launch_ref,
+};
+use cubek_matmul::definition::{MatmulElems, MatmulGlobalElems};
+use cubek_std::InputBinding;
+use half::f16;
+
+#[derive(Clone, Copy, Debug)]
+struct ConvolutionCase {
+    batches: usize,
+    in_h: usize,
+    in_w: usize,
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: [usize; 2],
+    stride: [usize; 2],
+    padding: [usize; 2],
+    dilation: [usize; 2],
+    has_bias: bool,
+}
+
+impl ConvolutionCase {
+    fn out_h(self) -> usize {
+        convolution_output_size(
+            self.in_h,
+            self.kernel_size[0],
+            self.stride[0],
+            self.padding[0],
+            self.dilation[0],
+        )
+    }
+
+    fn out_w(self) -> usize {
+        convolution_output_size(
+            self.in_w,
+            self.kernel_size[1],
+            self.stride[1],
+            self.padding[1],
+            self.dilation[1],
+        )
+    }
+}
+
+fn convolution_output_size(
+    input: usize,
+    kernel: usize,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+) -> usize {
+    (input + 2 * padding - dilation * (kernel - 1) - 1) / stride + 1
+}
+
+const REPETITIONS: usize = 2;
+const TOLERANCE: f32 = 0.5;
+const FORWARD_INPUT_VALUE: f32 = 0.25;
+const FORWARD_WEIGHT_VALUE: f32 = 0.25;
+const WGRAD_INPUT_VALUE: f32 = 0.25;
+const WGRAD_OUT_GRAD_VALUE: f32 = 0.25;
+
+fn f32_dtypes() -> MatmulElems {
+    let f32 = f32::elem_type_native();
+    MatmulElems::from_globals(&MatmulGlobalElems {
+        lhs: f32,
+        rhs: f32,
+        out: f32,
+    })
+}
+
+fn f16_dtypes() -> MatmulElems {
+    let f16 = f16::elem_type_native();
+    MatmulElems::from_globals(&MatmulGlobalElems {
+        lhs: f16,
+        rhs: f16,
+        out: f16,
+    })
+}
+
+fn rollout_case() -> ConvolutionCase {
+    ConvolutionCase {
+        batches: 4,
+        in_h: 32,
+        in_w: 32,
+        in_channels: 256,
+        out_channels: 64,
+        kernel_size: [3, 3],
+        stride: [1, 1],
+        padding: [1, 1],
+        dilation: [1, 1],
+        has_bias: true,
+    }
+}
+
+fn learner_cmma_case() -> ConvolutionCase {
+    ConvolutionCase {
+        batches: 256,
+        in_h: 32,
+        in_w: 32,
+        in_channels: 32,
+        out_channels: 32,
+        kernel_size: [1, 1],
+        stride: [1, 1],
+        padding: [0, 0],
+        dilation: [1, 1],
+        has_bias: true,
+    }
+}
+
+fn learner_wgrad_case() -> ConvolutionCase {
+    ConvolutionCase {
+        batches: 8,
+        in_h: 32,
+        in_w: 32,
+        in_channels: 256,
+        out_channels: 64,
+        kernel_size: [3, 3],
+        stride: [1, 1],
+        padding: [1, 1],
+        dilation: [1, 1],
+        has_bias: false,
+    }
+}
+
+fn compact_case() -> ConvolutionCase {
+    ConvolutionCase {
+        batches: 4,
+        in_h: 32,
+        in_w: 32,
+        in_channels: 32,
+        out_channels: 32,
+        kernel_size: [1, 1],
+        stride: [1, 1],
+        padding: [0, 0],
+        dilation: [1, 1],
+        has_bias: true,
+    }
+}
+
+fn args(case: &ConvolutionCase) -> ConvolutionArgs<2> {
+    ConvolutionArgs {
+        stride: case.stride,
+        padding: case.padding,
+        dilation: case.dilation,
+    }
+}
+
+fn client() -> Client {
+    Device::Cuda(CudaDevice::default()).client()
+}
+
+fn strategy(algorithm: ConvAlgorithm, tile_kind: AcceleratedTileKind) -> Strategy {
+    Strategy::Inferred {
+        algorithm,
+        tile_kind,
+    }
+}
+
+fn input_shape(case: &ConvolutionCase) -> Shape {
+    shape![case.batches, case.in_h, case.in_w, case.in_channels]
+}
+
+fn weight_shape(case: &ConvolutionCase) -> Shape {
+    shape![
+        case.out_channels,
+        case.kernel_size[0],
+        case.kernel_size[1],
+        case.in_channels
+    ]
+}
+
+fn output_shape(case: &ConvolutionCase) -> Shape {
+    shape![case.batches, case.out_h(), case.out_w(), case.out_channels]
+}
+
+fn ones_tensor(client: &Client, shape: Shape) -> TensorHandle {
+    filled_tensor(client, shape, 1.0)
+}
+
+fn filled_tensor(client: &Client, shape: Shape, value: f32) -> TensorHandle {
+    let num_elements = shape.iter().product();
+    tensor_from_f32(client, shape, vec![value; num_elements])
+}
+
+fn zeros_tensor(client: &Client, shape: Shape) -> TensorHandle {
+    let num_elements = shape.iter().product();
+    tensor_from_f32(client, shape, vec![0.0; num_elements])
+}
+
+fn filled_tensor_f32(client: &Client, shape: Shape, value: f32) -> TensorHandle {
+    let num_elements = shape.iter().product();
+    tensor_from_f32_native(client, shape, vec![value; num_elements])
+}
+
+fn zeros_tensor_f32(client: &Client, shape: Shape) -> TensorHandle {
+    let num_elements = shape.iter().product();
+    tensor_from_f32_native(client, shape, vec![0.0; num_elements])
+}
+
+fn tensor_from_f32(client: &Client, shape: Shape, values: Vec<f32>) -> TensorHandle {
+    let values = values.into_iter().map(f16::from_f32).collect::<Vec<f16>>();
+    let layout = client.create_tensor_from_slice(f16::as_bytes(&values), shape.clone(), 2);
+    TensorHandle::new(
+        layout.memory,
+        shape,
+        layout.strides,
+        f16::elem_type_native(),
+    )
+}
+
+fn tensor_from_f32_native(client: &Client, shape: Shape, values: Vec<f32>) -> TensorHandle {
+    let layout = client.create_tensor_from_slice(f32::as_bytes(&values), shape.clone(), 4);
+    TensorHandle::new(
+        layout.memory,
+        shape,
+        layout.strides,
+        f32::elem_type_native(),
+    )
+}
+
+fn logical_tensor(client: &Client, shape: Shape) -> TensorHandle {
+    let mut strides = vec![0; shape.len()];
+    strides[shape.len() - 1] = 1;
+    for index in (0..shape.len() - 1).rev() {
+        strides[index] = strides[index + 1] * shape[index + 1];
+    }
+
+    TensorHandle::new(
+        client.create_from_slice(f16::as_bytes(&[f16::ZERO])),
+        shape,
+        Strides::new(&strides),
+        f16::elem_type_native(),
+    )
+}
+
+fn read_f16(client: &Client, output: TensorHandle) -> Vec<f32> {
+    let bytes = client.read_one_unchecked_tensor(output.into_copy_descriptor());
+    f16::from_bytes(&bytes)
+        .iter()
+        .map(|value| value.to_f32())
+        .collect()
+}
+
+fn read_f32(client: &Client, output: TensorHandle) -> Vec<f32> {
+    let bytes = client.read_one_unchecked_tensor(output.into_copy_descriptor());
+    f32::from_bytes(&bytes).to_vec()
+}
+
+fn assert_close(actual: &[f32], expected: &[f32]) {
+    assert_close_with_tolerance(actual, expected, TOLERANCE);
+}
+
+fn assert_close_with_tolerance(actual: &[f32], expected: &[f32], tolerance: f32) {
+    assert_eq!(actual.len(), expected.len());
+    let mismatches = actual
+        .iter()
+        .zip(expected)
+        .enumerate()
+        .filter(|(_, (actual, expected))| (*actual - *expected).abs() > tolerance)
+        .take(16)
+        .map(|(index, (actual, expected))| (index, actual, expected))
+        .collect::<Vec<_>>();
+    assert!(
+        mismatches.is_empty(),
+        "Parity mismatches at {mismatches:?}; tolerance={tolerance}",
+    );
+}
+
+fn is_valid_input_position(
+    case: &ConvolutionCase,
+    out_y: usize,
+    out_x: usize,
+    ky: usize,
+    kx: usize,
+) -> bool {
+    let in_y = out_y as isize * case.stride[0] as isize + ky as isize * case.dilation[0] as isize
+        - case.padding[0] as isize;
+    let in_x = out_x as isize * case.stride[1] as isize + kx as isize * case.dilation[1] as isize
+        - case.padding[1] as isize;
+
+    in_y >= 0 && in_y < case.in_h as isize && in_x >= 0 && in_x < case.in_w as isize
+}
+
+fn expected_forward(case: &ConvolutionCase) -> Vec<f32> {
+    let mut output =
+        Vec::with_capacity(case.batches * case.out_h() * case.out_w() * case.out_channels);
+    let bias = usize::from(case.has_bias);
+
+    for _ in 0..case.batches {
+        for out_y in 0..case.out_h() {
+            for out_x in 0..case.out_w() {
+                let kernel_positions = (0..case.kernel_size[0])
+                    .flat_map(|ky| (0..case.kernel_size[1]).map(move |kx| (ky, kx)))
+                    .filter(|(ky, kx)| is_valid_input_position(case, out_y, out_x, *ky, *kx))
+                    .count();
+                let expected = (kernel_positions * case.in_channels) as f32
+                    * FORWARD_INPUT_VALUE
+                    * FORWARD_WEIGHT_VALUE
+                    + bias as f32;
+                output.extend(std::iter::repeat_n(expected, case.out_channels));
+            }
+        }
+    }
+
+    output
+}
+
+fn expected_backward_data(case: &ConvolutionCase) -> Vec<f32> {
+    let mut output = vec![0.0; case.batches * case.in_h * case.in_w * case.in_channels];
+
+    for batch in 0..case.batches {
+        for out_y in 0..case.out_h() {
+            for out_x in 0..case.out_w() {
+                for ky in 0..case.kernel_size[0] {
+                    for kx in 0..case.kernel_size[1] {
+                        if !is_valid_input_position(case, out_y, out_x, ky, kx) {
+                            continue;
+                        }
+                        let in_y = out_y * case.stride[0] + ky * case.dilation[0] - case.padding[0];
+                        let in_x = out_x * case.stride[1] + kx * case.dilation[1] - case.padding[1];
+                        let offset =
+                            ((batch * case.in_h + in_y) * case.in_w + in_x) * case.in_channels;
+                        for value in &mut output[offset..offset + case.in_channels] {
+                            *value += case.out_channels as f32;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    output
+}
+
+fn expected_backward_weight(case: &ConvolutionCase) -> Vec<f32> {
+    let mut output =
+        vec![0.0; case.out_channels * case.kernel_size[0] * case.kernel_size[1] * case.in_channels];
+
+    for ky in 0..case.kernel_size[0] {
+        for kx in 0..case.kernel_size[1] {
+            let spatial_positions = (0..case.out_h())
+                .flat_map(|out_y| (0..case.out_w()).map(move |out_x| (out_y, out_x)))
+                .filter(|(out_y, out_x)| is_valid_input_position(case, *out_y, *out_x, ky, kx))
+                .count();
+            let expected = (case.batches * spatial_positions) as f32
+                * WGRAD_INPUT_VALUE
+                * WGRAD_OUT_GRAD_VALUE;
+
+            for out_channel in 0..case.out_channels {
+                let offset = ((out_channel * case.kernel_size[0] + ky) * case.kernel_size[1] + kx)
+                    * case.in_channels;
+                output[offset..offset + case.in_channels].fill(expected);
+            }
+        }
+    }
+
+    output
+}
+
+fn assert_forward_parity(
+    case: &ConvolutionCase,
+    algorithm: ConvAlgorithm,
+    tile_kind: AcceleratedTileKind,
+) {
+    let client = client();
+    let dtypes = f16_dtypes();
+    let input = filled_tensor(&client, input_shape(case), FORWARD_INPUT_VALUE);
+    let weight = filled_tensor(&client, weight_shape(case), FORWARD_WEIGHT_VALUE);
+    let bias = case
+        .has_bias
+        .then(|| ones_tensor(&client, shape![case.out_channels]));
+    let expected = expected_forward(case);
+
+    for _ in 0..REPETITIONS {
+        let output = zeros_tensor(&client, output_shape(case));
+        launch_ref(
+            &strategy(algorithm, tile_kind),
+            &client,
+            ConvolutionInputs::Forward {
+                input: InputBinding::new(input.clone().binding(), dtypes.lhs_global),
+                weight: InputBinding::new(weight.clone().binding(), dtypes.rhs_global),
+                bias: bias
+                    .clone()
+                    .map(|bias| InputBinding::new(bias.binding(), dtypes.lhs_global)),
+                out: output.clone().binding(),
+            },
+            args(case),
+            dtypes.clone(),
+        )
+        .unwrap();
+        assert_close(&read_f16(&client, output), &expected);
+    }
+}
+
+fn assert_backward_data_parity(
+    case: &ConvolutionCase,
+    algorithm: ConvAlgorithm,
+    tile_kind: AcceleratedTileKind,
+) {
+    let client = client();
+    let dtypes = f16_dtypes();
+    let out_grad = ones_tensor(&client, output_shape(case));
+    let weight = ones_tensor(&client, weight_shape(case));
+    let expected = expected_backward_data(case);
+
+    for _ in 0..REPETITIONS {
+        let in_grad = zeros_tensor(&client, input_shape(case));
+        launch_ref(
+            &strategy(algorithm, tile_kind),
+            &client,
+            ConvolutionInputs::BackwardData {
+                out_grad: InputBinding::new(out_grad.clone().binding(), dtypes.lhs_global),
+                weights: InputBinding::new(weight.clone().binding(), dtypes.rhs_global),
+                in_grad: in_grad.clone().binding(),
+            },
+            args(case),
+            dtypes.clone(),
+        )
+        .unwrap();
+        assert_close(&read_f16(&client, in_grad), &expected);
+    }
+}
+
+fn assert_backward_weight_parity(
+    case: &ConvolutionCase,
+    algorithm: ConvAlgorithm,
+    tile_kind: AcceleratedTileKind,
+) {
+    let client = client();
+    let dtypes = f16_dtypes();
+    let input = filled_tensor(&client, input_shape(case), WGRAD_INPUT_VALUE);
+    let out_grad = filled_tensor(&client, output_shape(case), WGRAD_OUT_GRAD_VALUE);
+    let expected = expected_backward_weight(case);
+
+    for _ in 0..REPETITIONS {
+        let weight_grad = zeros_tensor(&client, weight_shape(case));
+        launch_ref(
+            &strategy(algorithm, tile_kind),
+            &client,
+            ConvolutionInputs::BackwardWeight {
+                input: InputBinding::new(input.clone().binding(), dtypes.lhs_global),
+                out_grad: InputBinding::new(out_grad.clone().binding(), dtypes.rhs_global),
+                weight_grad: weight_grad.clone().binding(),
+            },
+            args(case),
+            dtypes.clone(),
+        )
+        .unwrap();
+        assert_close(&read_f16(&client, weight_grad), &expected);
+    }
+}
+
+fn assert_backward_weight_f32_parity(
+    case: &ConvolutionCase,
+    algorithm: ConvAlgorithm,
+    tile_kind: AcceleratedTileKind,
+) {
+    let client = client();
+    let dtypes = f32_dtypes();
+    let input = filled_tensor_f32(&client, input_shape(case), WGRAD_INPUT_VALUE);
+    let out_grad = filled_tensor_f32(&client, output_shape(case), WGRAD_OUT_GRAD_VALUE);
+    let expected = expected_backward_weight(case);
+
+    for _ in 0..REPETITIONS {
+        let weight_grad = zeros_tensor_f32(&client, weight_shape(case));
+        launch_ref(
+            &strategy(algorithm, tile_kind),
+            &client,
+            ConvolutionInputs::BackwardWeight {
+                input: InputBinding::new(input.clone().binding(), dtypes.lhs_global),
+                out_grad: InputBinding::new(out_grad.clone().binding(), dtypes.rhs_global),
+                weight_grad: weight_grad.clone().binding(),
+            },
+            args(case),
+            dtypes.clone(),
+        )
+        .unwrap();
+        assert_close_with_tolerance(&read_f32(&client, weight_grad), &expected, 1.0e-2);
+    }
+}
+
+#[test]
+fn test_terminalo3_forward_simple_async_tma_mma_parity() {
+    assert_forward_parity(
+        &rollout_case(),
+        ConvAlgorithm::SimpleAsyncTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_forward_simple_async_tma_mma_compact_parity() {
+    assert_forward_parity(
+        &compact_case(),
+        ConvAlgorithm::SimpleAsyncTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_forward_specialized_tma_mma_parity() {
+    assert_forward_parity(
+        &rollout_case(),
+        ConvAlgorithm::SpecializedTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_forward_specialized_tma_mma_compact_parity() {
+    assert_forward_parity(
+        &compact_case(),
+        ConvAlgorithm::SpecializedTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_forward_specialized_async_parity() {
+    let case = compact_case();
+    for (algorithm, tile_kind) in [
+        (
+            ConvAlgorithm::SpecializedAsyncCyclic,
+            AcceleratedTileKind::Cmma,
+        ),
+        (
+            ConvAlgorithm::SpecializedAsyncStrided,
+            AcceleratedTileKind::Mma,
+        ),
+    ] {
+        assert_forward_parity(&case, algorithm, tile_kind);
+    }
+}
+
+#[test]
+fn test_terminalo3_forward_simple_async_tma_mma_without_bias_parity() {
+    let mut case = rollout_case();
+    case.has_bias = false;
+    assert_forward_parity(
+        &case,
+        ConvAlgorithm::SimpleAsyncTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_backward_weight_simple_async_tma_cmma_parity() {
+    assert_backward_weight_parity(
+        &learner_cmma_case(),
+        ConvAlgorithm::SimpleAsyncTma,
+        AcceleratedTileKind::Cmma,
+    );
+}
+
+#[test]
+fn test_terminalo3_backward_weight_simple_async_tma_mma_parity() {
+    assert_backward_weight_parity(
+        &rollout_case(),
+        ConvAlgorithm::SimpleAsyncTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_backward_data_simple_async_tma_mma_parity() {
+    assert_backward_data_parity(
+        &rollout_case(),
+        ConvAlgorithm::SimpleAsyncTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_backward_data_simple_async_tma_mma_compact_parity() {
+    assert_backward_data_parity(
+        &compact_case(),
+        ConvAlgorithm::SimpleAsyncTma,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_forward_non_tma_implicit_gemm_parity() {
+    let case = compact_case();
+    for (algorithm, tile_kind) in [
+        (ConvAlgorithm::SimpleSyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleSyncStrided, AcceleratedTileKind::Mma),
+        (ConvAlgorithm::SimpleAsyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleAsyncStrided, AcceleratedTileKind::Mma),
+    ] {
+        assert_forward_parity(&case, algorithm, tile_kind);
+    }
+}
+
+#[test]
+fn test_terminalo3_forward_simple_async_strided_mma_rollout_parity() {
+    assert_forward_parity(
+        &rollout_case(),
+        ConvAlgorithm::SimpleAsyncStrided,
+        AcceleratedTileKind::Mma,
+    );
+}
+
+#[test]
+fn test_terminalo3_forward_large_biased_cmma_shared_memory_rejected() {
+    let client = client();
+    let dtypes = f16_dtypes();
+    let case = ConvolutionCase {
+        batches: 8192,
+        ..rollout_case()
+    };
+    let input = logical_tensor(&client, input_shape(&case));
+    let weight = logical_tensor(&client, weight_shape(&case));
+    let bias = logical_tensor(&client, shape![case.out_channels]);
+    let output = logical_tensor(&client, output_shape(&case));
+
+    for algorithm in [
+        ConvAlgorithm::SimpleSyncCyclic,
+        ConvAlgorithm::SimpleAsyncCyclic,
+        ConvAlgorithm::SimpleAsyncTma,
+    ] {
+        let error = launch_ref(
+            &strategy(algorithm, AcceleratedTileKind::Cmma),
+            &client,
+            ConvolutionInputs::Forward {
+                input: InputBinding::new(input.clone().binding(), dtypes.lhs_global),
+                weight: InputBinding::new(weight.clone().binding(), dtypes.rhs_global),
+                bias: Some(InputBinding::new(bias.clone().binding(), dtypes.lhs_global)),
+                out: output.clone().binding(),
+            },
+            args(&case),
+            dtypes.clone(),
+        )
+        .expect_err("oversized biased CMMA convolution should fail during setup");
+
+        let error = format!("{error:?}");
+        assert!(
+            error.contains("Shared memory budget exceeded"),
+            "{algorithm:?} returned an unexpected error: {error}",
+        );
+    }
+
+    assert_forward_parity(
+        &compact_case(),
+        ConvAlgorithm::SimpleSyncCyclic,
+        AcceleratedTileKind::Cmma,
+    );
+}
+
+#[test]
+fn test_terminalo3_backward_data_non_tma_implicit_gemm_parity() {
+    let case = compact_case();
+    for (algorithm, tile_kind) in [
+        (ConvAlgorithm::SimpleSyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleSyncStrided, AcceleratedTileKind::Mma),
+        (ConvAlgorithm::SimpleAsyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleAsyncStrided, AcceleratedTileKind::Mma),
+    ] {
+        assert_backward_data_parity(&case, algorithm, tile_kind);
+    }
+}
+
+#[test]
+fn test_terminalo3_backward_weight_non_tma_implicit_gemm_parity() {
+    let case = compact_case();
+    for (algorithm, tile_kind) in [
+        (ConvAlgorithm::SimpleSyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleSyncStrided, AcceleratedTileKind::Mma),
+        (ConvAlgorithm::SimpleAsyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleAsyncStrided, AcceleratedTileKind::Mma),
+    ] {
+        assert_backward_weight_parity(&case, algorithm, tile_kind);
+    }
+}
+
+#[test]
+fn test_terminalo3_backward_weight_non_tma_implicit_gemm_f32_learner_parity() {
+    let case = learner_wgrad_case();
+    for (algorithm, tile_kind) in [
+        (ConvAlgorithm::SimpleSyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleSyncStrided, AcceleratedTileKind::Mma),
+        (ConvAlgorithm::SimpleAsyncCyclic, AcceleratedTileKind::Cmma),
+        (ConvAlgorithm::SimpleAsyncStrided, AcceleratedTileKind::Mma),
+    ] {
+        assert_backward_weight_f32_parity(&case, algorithm, tile_kind);
+    }
+}

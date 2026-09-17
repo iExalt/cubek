@@ -11,3 +11,6 @@ pub mod extended;
 pub mod full;
 
 pub mod launcher_strategy;
+
+#[cfg(feature = "cuda-tests")]
+mod terminalo3_cuda;

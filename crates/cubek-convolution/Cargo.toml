@@ -17,6 +17,7 @@ std = ["cubecl/std"]
 heavy = []
 extended = ["heavy"]
 full = ["extended", "benchmarks"]
+cuda-tests = ["cubecl/cuda"]
 
 cpu-reference = ["dep:cubek-test-utils", "cubek-matmul/cpu-reference"]
 # Enables `pub mod benchmarks` — catalogue of conv2d benchmark problems /
