@@ -1,6 +1,7 @@
 use cubecl::{
     calculate_cube_count_elemwise,
     client::Client,
+    ir::{ElemType, FloatKind},
     num_traits::Zero,
     prelude::*,
     std::tensor::layout::linear::{LinearViewMut, linear_view},
@@ -42,7 +43,7 @@ struct Conv2dArgs {
 
 #[cube(launch_unchecked, address_type = "dynamic")]
 #[allow(clippy::redundant_closure)]
-fn direct_conv2d_kernel<E: Numeric, NIn: Size, NOut: Size>(
+fn direct_conv2d_kernel<E: Numeric, EA: Numeric, NIn: Size, NOut: Size>(
     input: &Tensor<Vector<E, NIn>>,
     weight: &Tensor<Vector<E, NIn>>,
     bias: ComptimeOption<&[Vector<E, NOut>]>,
@@ -52,7 +53,7 @@ fn direct_conv2d_kernel<E: Numeric, NIn: Size, NOut: Size>(
     shape_out_c: FastDivmod<u32>,
     #[comptime] has_padding: bool,
     #[comptime] accumulate_lanes: bool,
-    #[define(E)] _dtype: ElemType,
+    #[define(E, EA)] _dtypes: [ElemType; 2],
 ) {
     if !output.is_in_bounds(ABSOLUTE_POS) {
         terminate!();
@@ -71,8 +72,8 @@ fn direct_conv2d_kernel<E: Numeric, NIn: Size, NOut: Size>(
     let g = out_c / args.channels_per_group;
     let ic_start = in_c_per_group * g;
 
-    let bias: ComptimeOption<Vector<E, NOut>> =
-        bias.map(|bias| bias[out_c as usize / vector_size_out]);
+    let bias: ComptimeOption<Vector<EA, NOut>> =
+        bias.map(|bias| Vector::cast_from(bias[out_c as usize / vector_size_out]));
     let mut sum = bias.unwrap_or_else(|| Vector::zero());
 
     let in_offs = b as usize * input.stride(0) + ic_start as usize;
@@ -118,7 +119,7 @@ fn direct_conv2d_kernel<E: Numeric, NIn: Size, NOut: Size>(
         accumulate_lanes,
     );
 
-    output.write(ABSOLUTE_POS, sum);
+    output.write(ABSOLUTE_POS, Vector::cast_from(sum));
 }
 
 #[derive(CubeType, Clone)]
@@ -135,10 +136,10 @@ struct LoopParams {
 }
 
 #[cube]
-fn kernel_loop<E: Numeric, NIn: Size, NOut: Size>(
+fn kernel_loop<E: Numeric, EA: Numeric, NIn: Size, NOut: Size>(
     input: &Tensor<Vector<E, NIn>>,
     weight: &Tensor<Vector<E, NIn>>,
-    sum: &mut Vector<E, NOut>,
+    sum: &mut Vector<EA, NOut>,
     in_offs: usize,
     in_bounds: bool,
     weight_offs: usize,
@@ -193,10 +194,10 @@ fn kernel_loop<E: Numeric, NIn: Size, NOut: Size>(
 }
 
 #[cube]
-fn kernel_loop_inner<E: Numeric, NIn: Size, NOut: Size>(
+fn kernel_loop_inner<E: Numeric, EA: Numeric, NIn: Size, NOut: Size>(
     input: &Tensor<Vector<E, NIn>>,
     weight: &Tensor<Vector<E, NIn>>,
-    sum: &mut Vector<E, NOut>,
+    sum: &mut Vector<EA, NOut>,
     in_offs: usize,
     in_bounds: bool,
     weight_offs: usize,
@@ -231,10 +232,10 @@ fn kernel_loop_inner<E: Numeric, NIn: Size, NOut: Size>(
 
 /// One input read per output channel buys a channel loop with no dependency chain.
 #[cube]
-fn accumulate_in_lanes<E: Numeric, NIn: Size, NOut: Size>(
+fn accumulate_in_lanes<E: Numeric, EA: Numeric, NIn: Size, NOut: Size>(
     input: &Tensor<Vector<E, NIn>>,
     weight: &Tensor<Vector<E, NIn>>,
-    sum: &mut Vector<E, NOut>,
+    sum: &mut Vector<EA, NOut>,
     in_offs: usize,
     weight_offs: usize,
     in_c_per_group: u32,
@@ -245,13 +246,16 @@ fn accumulate_in_lanes<E: Numeric, NIn: Size, NOut: Size>(
 
     #[unroll]
     for v in 0..vector_size_out {
-        let mut lanes = Vector::<E, NIn>::zero();
+        let mut lanes = Vector::<EA, NIn>::zero();
         let weight_offs = weight_offs + v * stride_oc;
 
         for in_c in range_stepped(0, in_c_per_group, vector_size_in as u32) {
-            let val = input[(in_offs + in_c as usize) / vector_size_in];
+            let val: Vector<EA, NIn> =
+                Vector::cast_from(input[(in_offs + in_c as usize) / vector_size_in]);
 
-            lanes += val * weight[(weight_offs + in_c as usize) / vector_size_in];
+            let weight: Vector<EA, NIn> =
+                Vector::cast_from(weight[(weight_offs + in_c as usize) / vector_size_in]);
+            lanes += val * weight;
         }
 
         let mut channel = sum.extract(v);
@@ -267,10 +271,10 @@ fn accumulate_in_lanes<E: Numeric, NIn: Size, NOut: Size>(
 
 /// One input read serves every output channel, which is all a one-step channel loop can win.
 #[cube]
-fn accumulate_per_step<E: Numeric, NIn: Size, NOut: Size>(
+fn accumulate_per_step<E: Numeric, EA: Numeric, NIn: Size, NOut: Size>(
     input: &Tensor<Vector<E, NIn>>,
     weight: &Tensor<Vector<E, NIn>>,
-    sum: &mut Vector<E, NOut>,
+    sum: &mut Vector<EA, NOut>,
     in_offs: usize,
     weight_offs: usize,
     in_c_per_group: u32,
@@ -283,11 +287,11 @@ fn accumulate_per_step<E: Numeric, NIn: Size, NOut: Size>(
         let in_pos = in_offs + in_c as usize;
         let mut weight_pos = weight_offs + in_c as usize;
 
-        let val = input[in_pos / vector_size_in];
+        let val: Vector<EA, NIn> = Vector::cast_from(input[in_pos / vector_size_in]);
 
         #[unroll]
         for v in 0..vector_size_out {
-            let weight = weight[weight_pos / vector_size_in];
+            let weight: Vector<EA, NIn> = Vector::cast_from(weight[weight_pos / vector_size_in]);
             let val = val * weight;
 
             #[unroll]
@@ -296,6 +300,13 @@ fn accumulate_per_step<E: Numeric, NIn: Size, NOut: Size>(
             }
             weight_pos += stride_oc;
         }
+    }
+}
+
+fn direct_accumulator_dtype(dtype: ElemType) -> ElemType {
+    match dtype {
+        ElemType::Float(FloatKind::F16 | FloatKind::BF16) => ElemType::Float(FloatKind::F32),
+        _ => dtype,
     }
 }
 
@@ -396,7 +407,7 @@ pub fn launch_direct<const N: usize>(
             shape_out_c,
             check_spatial_bounds,
             accumulate_lanes,
-            dtype,
+            [dtype, direct_accumulator_dtype(dtype)],
         )
     };
 
@@ -417,4 +428,32 @@ fn should_check_spatial_bounds<const N: usize>(
             - begin;
         first < 0 || last >= in_shape[dim] as i64
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::direct_accumulator_dtype;
+    use cubecl::ir::{ElemType, FloatKind};
+
+    #[test]
+    fn direct_half_accumulation_uses_f32() {
+        assert_eq!(
+            direct_accumulator_dtype(ElemType::Float(FloatKind::F16)),
+            ElemType::Float(FloatKind::F32)
+        );
+        assert_eq!(
+            direct_accumulator_dtype(ElemType::Float(FloatKind::BF16)),
+            ElemType::Float(FloatKind::F32)
+        );
+    }
+
+    #[test]
+    fn direct_non_half_accumulation_preserves_dtype() {
+        for dtype in [
+            ElemType::Float(FloatKind::F32),
+            ElemType::Float(FloatKind::F64),
+        ] {
+            assert_eq!(direct_accumulator_dtype(dtype), dtype);
+        }
+    }
 }
