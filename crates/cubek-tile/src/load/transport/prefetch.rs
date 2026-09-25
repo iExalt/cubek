@@ -13,7 +13,13 @@ use crate::*;
 
 /// Scalars of both operands' stages one unit may hold in registers beside a contraction's own
 /// accumulator, summed over the two ([`UnitLines::scalars`]).
-pub const MOST_FETCHED_SCALARS: usize = 64;
+///
+/// 128 scalars: as many registers of 32-bit values, half as many of packed 16-bit pairs. That is
+/// enough for a GEMM stage 64 deep on eight planes (96 scalars a unit), whose global loads are
+/// then in flight across a contraction rather than waited on after it. Whether a stage this large
+/// still fits beside its accumulator without spilling is the caller's to measure; a bound only
+/// rules out what cannot pay.
+pub const MOST_FETCHED_SCALARS: usize = 128;
 
 /// The lines of one stage a single unit moves, when the cube's units take them between them.
 ///
@@ -124,6 +130,7 @@ impl<T: Numeric> Memory<T> {
         comptime!(fill_extent(&space, w, w, check));
         let shape = self.layout.physical_shape.clone();
         let projection = comptime!(self.layout.projection.clone());
+        let rows = comptime!(self.layout.rows);
         let lines = self.unit_lines();
         let total = self.stage_lines();
         let s = Masked::new(
@@ -136,7 +143,7 @@ impl<T: Numeric> Memory<T> {
             if in_stage(i, total, t, comptime!(lines)) {
                 fetched[t] = read_stage_line::<T, W, W>(
                     &s,
-                    &physical_pos(comptime!(projection.clone()), i, &shape),
+                    &physical_pos(comptime!(projection.clone()), rows, i, &shape),
                     comptime!(None),
                 );
             }
@@ -151,12 +158,15 @@ impl<T: Numeric> Memory<T> {
     pub(crate) fn store_fetched<W: Size>(&mut self, fetched: &Array<Vector<T, W>>) {
         let lines = self.unit_lines();
         let total = self.stage_lines();
+        let rows = comptime!(self.layout.rows);
+        let shape = self.layout.physical_shape.clone();
+        let strides = self.layout.physical_strides.clone();
         let d = self.lines_storage_mut::<T, W>();
         #[unroll]
         for t in 0..comptime!(lines.tasks()) {
             let i = task_line(t, comptime!(lines));
             if in_stage(i, total, t, comptime!(lines)) {
-                d[i] = fetched[t];
+                d[stage_offset(rows, i, &shape, &strides)] = fetched[t];
             }
         }
     }
