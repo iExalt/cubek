@@ -111,8 +111,8 @@ pub fn convolution_matmul_selection(
     let hardware = &client.properties().hardware;
     let num_sm = hardware
         .num_streaming_multiprocessors
-        .unwrap_or(NUM_TENSOR_CORES_APPROX);
-    let max_tensor_cores = hardware.num_tensor_cores.unwrap_or(NUM_SM_APPROX);
+        .unwrap_or(NUM_SM_APPROX);
+    let max_tensor_cores = hardware.num_tensor_cores.unwrap_or(NUM_TENSOR_CORES_APPROX);
 
     let (stage_size_m, stage_size_n) = find_stage_size_m_n(
         problem.m,
